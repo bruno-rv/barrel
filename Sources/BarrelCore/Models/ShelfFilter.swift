@@ -36,6 +36,7 @@ public enum ShelfFilter: String, CaseIterable, Codable, Identifiable, Sendable {
   }
 
   public func accepts(_ item: ShelfItem) -> Bool {
+    guard item.deletedAt == nil else { return false }
     if self == .trash {
       return item.trashedAt != nil
     }

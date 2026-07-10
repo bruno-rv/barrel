@@ -75,6 +75,29 @@ final class SyncCoordinatorTests: XCTestCase {
     XCTAssertEqual(pushed, [])
   }
 
+  func testCancellationAfterFetchStartsPreventsPush() async throws {
+    let local = SyncRecord(item: item(id: UUID(), title: "Local", offset: 1, deviceID: "mac-a"))
+    let transport = SuspendedSyncTransport()
+    let task = Task {
+      try await SyncCoordinator.synchronize(local: [local], transport: transport)
+    }
+    while !(await transport.isFetching) {
+      await Task.yield()
+    }
+
+    task.cancel()
+    await transport.resumeFetch(with: [])
+
+    do {
+      _ = try await task.value
+      XCTFail("Expected cancellation")
+    } catch is CancellationError {
+      // Expected.
+    }
+    let pushed = await transport.pushedRecords
+    XCTAssertTrue(pushed.isEmpty)
+  }
+
   private func item(
     id: UUID,
     title: String,
@@ -123,4 +146,24 @@ private actor InMemorySyncTransport: SyncTransport {
 
 private enum TestError: Error {
   case fetchFailed
+}
+
+private actor SuspendedSyncTransport: SyncTransport {
+  private var continuation: CheckedContinuation<[SyncRecord], Never>?
+  private(set) var pushedRecords: [SyncRecord] = []
+
+  var isFetching: Bool { continuation != nil }
+
+  func fetch() async throws -> [SyncRecord] {
+    await withCheckedContinuation { continuation = $0 }
+  }
+
+  func push(_ records: [SyncRecord]) async throws {
+    pushedRecords.append(contentsOf: records)
+  }
+
+  func resumeFetch(with records: [SyncRecord]) {
+    continuation?.resume(returning: records)
+    continuation = nil
+  }
 }

@@ -2,11 +2,25 @@ import Foundation
 
 public struct SyncRecord: Equatable, Sendable {
   public var item: ShelfItem
-  public var assetURL: URL?
+  public var assetsByRelativePath: [String: URL]
 
-  public init(item: ShelfItem, assetURL: URL? = nil) {
+  public init(item: ShelfItem, assetsByRelativePath: [String: URL] = [:]) {
     self.item = item
-    self.assetURL = assetURL
+    self.assetsByRelativePath = assetsByRelativePath
+  }
+
+  public init(item: ShelfItem, assetURL: URL?) {
+    self.item = item
+    if let path = item.relativePath, let assetURL {
+      assetsByRelativePath = [path: assetURL]
+    } else {
+      assetsByRelativePath = [:]
+    }
+  }
+
+  public var assetURL: URL? {
+    guard let path = item.relativePath else { return nil }
+    return assetsByRelativePath[path]
   }
 }
 
@@ -21,39 +35,53 @@ public enum SyncCoordinator {
     transport: Transport
   ) async throws -> [SyncRecord] {
     let remote = try await transport.fetch()
+    try Task.checkCancellation()
+    let merged = merge(local: local, remote: remote)
+    let localByID = latestRecordsByID(local)
+    let remoteByID = latestRecordsByID(remote)
+    let recordsToPush = merged.filter { mergedRecord in
+      guard let localRecord = localByID[mergedRecord.item.id] else { return false }
+      guard let remoteRecord = remoteByID[mergedRecord.item.id] else { return true }
+      if SyncResolver.isNewer(localRecord.item, than: remoteRecord.item) {
+        return true
+      }
+      return localRecord.item == remoteRecord.item
+        && !Set(localRecord.assetsByRelativePath.keys)
+          .isSubset(of: Set(remoteRecord.assetsByRelativePath.keys))
+    }
+    if !recordsToPush.isEmpty {
+      try Task.checkCancellation()
+      try await transport.push(recordsToPush)
+    }
+    try Task.checkCancellation()
+    return merged
+  }
+
+  public static func merge(local: [SyncRecord], remote: [SyncRecord]) -> [SyncRecord] {
     let localByID = latestRecordsByID(local)
     let remoteByID = latestRecordsByID(remote)
     let mergedItems = SyncResolver.merge(
       local: localByID.values.map(\.item),
       remote: remoteByID.values.map(\.item)
     )
-    var recordsToPush: [SyncRecord] = []
-    let merged = mergedItems.map { item -> SyncRecord in
+    return mergedItems.map { item in
       let localRecord = localByID[item.id]
       let remoteRecord = remoteByID[item.id]
-      if let localRecord, localRecord.item == item,
-         remoteRecord?.item != item {
-        recordsToPush.append(localRecord)
+      if let localRecord, let remoteRecord, localRecord.item == remoteRecord.item {
+        let assets = remoteRecord.assetsByRelativePath.merging(
+          localRecord.assetsByRelativePath,
+          uniquingKeysWith: { _, local in local }
+        )
+        return SyncRecord(item: item, assetsByRelativePath: assets)
+      }
+      if let localRecord, localRecord.item == item {
         return localRecord
       }
-      if let remoteRecord, remoteRecord.item == item {
-        if remoteRecord.item == localRecord?.item,
-           remoteRecord.assetURL == nil,
-           let localAssetURL = localRecord?.assetURL {
-          return SyncRecord(item: item, assetURL: localAssetURL)
-        }
-        return remoteRecord
-      }
-      guard let localRecord else {
+      guard let remoteRecord else {
         preconditionFailure("Merged sync item has no source record")
       }
-      recordsToPush.append(localRecord)
-      return localRecord
+      return remoteRecord
     }
-    if !recordsToPush.isEmpty {
-      try await transport.push(recordsToPush)
-    }
-    return merged
   }
 
   private static func latestRecordsByID(_ records: [SyncRecord]) -> [UUID: SyncRecord] {

@@ -6,6 +6,7 @@ public actor ShelfRepository {
   private let fileManager: FileManager
   private var items: [ShelfItem] = []
   private var quotaBytes: Int64
+  private var isLoaded = false
 
   private var itemsDirectory: URL {
     configuration.rootURL.appendingPathComponent("Items", isDirectory: true)
@@ -27,11 +28,13 @@ public actor ShelfRepository {
 
   @discardableResult
   public func load() throws -> [ShelfItem] {
+    guard !isLoaded else { return items }
     try prepareStorage()
     guard fileManager.fileExists(atPath: manifestURL.path) else {
       items = []
       try clearStaging()
       try removeOrphans()
+      isLoaded = true
       return items
     }
 
@@ -51,6 +54,7 @@ public actor ShelfRepository {
     items = decoded
     try clearStaging()
     try removeOrphans()
+    isLoaded = true
     return items
   }
 
@@ -68,7 +72,7 @@ public actor ShelfRepository {
     expiresAt: Date?
   ) async -> ImportOutcome {
     do {
-      try prepareStorage()
+      try ensureLoaded()
     } catch {
       return ImportOutcome(
         successes: [],
@@ -101,7 +105,7 @@ public actor ShelfRepository {
     origin: ShelfOrigin,
     expiresAt: Date?
   ) throws -> ShelfItem {
-    try prepareStorage()
+    try ensureLoaded()
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
     let firstLine = trimmed.split(separator: "\n", omittingEmptySubsequences: true).first
     let fallback = kind == .link ? URL(string: trimmed)?.host : nil
@@ -123,6 +127,7 @@ public actor ShelfRepository {
   }
 
   public func rename(id: UUID, title: String) throws {
+    try ensureLoaded()
     guard let index = items.firstIndex(where: { $0.id == id }) else {
       throw RepositoryError.itemNotFound(id)
     }
@@ -137,8 +142,9 @@ public actor ShelfRepository {
 
   @discardableResult
   public func stack(ids: [UUID]) throws -> ShelfItem {
+    try ensureLoaded()
     let selectedIDs = Set(ids)
-    let selected = items.filter { selectedIDs.contains($0.id) }
+    let selected = items.filter { selectedIDs.contains($0.id) && $0.deletedAt == nil }
     guard selected.count >= 2 else {
       throw RepositoryError.invalidSelection
     }
@@ -163,6 +169,7 @@ public actor ShelfRepository {
   }
 
   public func split(id: UUID) throws {
+    try ensureLoaded()
     guard let index = items.firstIndex(where: { $0.id == id }) else {
       throw RepositoryError.itemNotFound(id)
     }
@@ -177,19 +184,24 @@ public actor ShelfRepository {
   }
 
   public func setPinned(id: UUID, isPinned: Bool) throws {
+    try ensureLoaded()
     try update(id: id) { $0.isPinned = isPinned }
   }
 
   public func setExpiration(id: UUID, date: Date?) throws {
+    try ensureLoaded()
     try update(id: id) { $0.expiresAt = date }
   }
 
   public func trash(ids: [UUID]) throws {
+    try ensureLoaded()
     let targetIDs = Set(ids)
     let now = configuration.now()
     var updated = items
     for index in updated.indices
-    where targetIDs.contains(updated[index].id) && updated[index].trashedAt == nil {
+    where targetIDs.contains(updated[index].id)
+      && updated[index].trashedAt == nil
+      && updated[index].deletedAt == nil {
       updated[index].trashedAt = now
       touch(&updated[index], at: now)
     }
@@ -199,10 +211,12 @@ public actor ShelfRepository {
   }
 
   public func restore(ids: [UUID]) throws {
+    try ensureLoaded()
     let targetIDs = Set(ids)
     let now = configuration.now()
     var updated = items
-    for index in updated.indices where targetIDs.contains(updated[index].id) {
+    for index in updated.indices
+    where targetIDs.contains(updated[index].id) && updated[index].deletedAt == nil {
       updated[index].trashedAt = nil
       touch(&updated[index], at: now)
     }
@@ -210,19 +224,29 @@ public actor ShelfRepository {
   }
 
   public func emptyTrash() throws {
-    let removed = items.filter { $0.trashedAt != nil }
+    try ensureLoaded()
+    let removed = items.filter { $0.trashedAt != nil && $0.deletedAt == nil }
     guard !removed.isEmpty else { return }
-    let remaining = items.filter { $0.trashedAt == nil }
+    let removedIDs = Set(removed.map(\.id))
+    let now = configuration.now()
+    let remaining = items.map { item in
+      removedIDs.contains(item.id) ? tombstone(for: item, at: now) : item
+    }
     try commitItems(remaining)
     try deleteUnreferencedFiles(from: removed, remainingItems: remaining)
   }
 
   public func deletePermanently(ids: [UUID]) throws {
+    try ensureLoaded()
     let targetIDs = Set(ids)
-    let removed = items.filter { targetIDs.contains($0.id) && $0.trashedAt != nil }
+    let removed = items.filter {
+      targetIDs.contains($0.id) && $0.trashedAt != nil && $0.deletedAt == nil
+    }
     guard !removed.isEmpty else { return }
-    let remaining = items.filter { item in
-      !targetIDs.contains(item.id) || item.trashedAt == nil
+    let removedIDs = Set(removed.map(\.id))
+    let now = configuration.now()
+    let remaining = items.map { item in
+      removedIDs.contains(item.id) ? tombstone(for: item, at: now) : item
     }
     try commitItems(remaining)
     try deleteUnreferencedFiles(from: removed, remainingItems: remaining)
@@ -230,13 +254,15 @@ public actor ShelfRepository {
 
   @discardableResult
   public func cleanup() throws -> CleanupOutcome {
+    try ensureLoaded()
     let now = configuration.now()
     let trashCutoff = now.addingTimeInterval(-configuration.trashRetention)
     let permanentlyRemoved = items.filter { item in
-      item.trashedAt.map { $0 <= trashCutoff } == true
+      item.deletedAt == nil && item.trashedAt.map { $0 <= trashCutoff } == true
     }
-    var updated = items.filter { item in
-      item.trashedAt.map { $0 <= trashCutoff } != true
+    let permanentlyRemovedIDs = Set(permanentlyRemoved.map(\.id))
+    var updated = items.map { item in
+      permanentlyRemovedIDs.contains(item.id) ? tombstone(for: item, at: now) : item
     }
     let sizes = physicalBytesByItemID(updated, now: now)
     let candidates = Set(
@@ -247,7 +273,8 @@ public actor ShelfRepository {
         quotaBytes: quotaBytes
       )
     )
-    for index in updated.indices where candidates.contains(updated[index].id) {
+    for index in updated.indices
+    where candidates.contains(updated[index].id) && updated[index].deletedAt == nil {
       updated[index].trashedAt = now
       touch(&updated[index], at: now)
     }
@@ -278,61 +305,50 @@ public actor ShelfRepository {
     return total
   }
 
-  public func syncRecords() -> [SyncRecord] {
-    items.map { item in
-      SyncRecord(item: item, assetURL: fileURL(for: item))
-    }
+  public func syncRecords() throws -> [SyncRecord] {
+    try ensureLoaded()
+    return makeSyncRecords(from: items)
   }
 
   public func applySyncRecords(_ records: [SyncRecord]) throws {
-    try prepareStorage()
+    try Task.checkCancellation()
+    try ensureLoaded()
+    let previousItems = items
+    let merged = SyncCoordinator.merge(
+      local: makeSyncRecords(from: items),
+      remote: records
+    )
     var updated: [ShelfItem] = []
-    var installedDirectories: [URL] = []
+    var createdFiles: [URL] = []
+    var createdDirectories: [URL] = []
     do {
-      for record in records {
+      for record in merged {
+        try Task.checkCancellation()
         var item = record.item
-        let existingURL = item.relativePath.flatMap(managedURL(for:))
-        if existingURL.map({ fileManager.fileExists(atPath: $0.path) }) != true {
-          if let assetURL = record.assetURL {
-            let fileName = (item.fileName ?? assetURL.lastPathComponent).isEmpty
-              ? "Synced File"
-              : (item.fileName ?? assetURL.lastPathComponent)
-            let safeFileName = URL(fileURLWithPath: fileName).lastPathComponent
-            let managedDirectory = itemsDirectory
-              .appendingPathComponent(item.id.uuidString, isDirectory: true)
-            let destination = managedDirectory.appendingPathComponent(safeFileName)
-            let stagedDirectory = stagingDirectory
-              .appendingPathComponent("Sync-\(UUID().uuidString)", isDirectory: true)
-            let stagedFile = stagedDirectory.appendingPathComponent(safeFileName)
-            try fileManager.createDirectory(at: stagedDirectory, withIntermediateDirectories: true)
-            do {
-              try fileManager.copyItem(at: assetURL, to: stagedFile)
-              try fileManager.createDirectory(at: managedDirectory, withIntermediateDirectories: true)
-              try fileManager.moveItem(at: stagedFile, to: destination)
-              installedDirectories.append(managedDirectory)
-              item.fileName = safeFileName
-              item.relativePath = makeRelativePath(for: destination)
-            } catch {
-              try? fileManager.removeItem(at: managedDirectory)
-              throw error
-            }
-            try? fileManager.removeItem(at: stagedDirectory)
-          } else {
-            item.relativePath = nil
-          }
-        }
+        try installAssets(
+          in: &item,
+          from: record.assetsByRelativePath,
+          createdFiles: &createdFiles,
+          createdDirectories: &createdDirectories
+        )
         updated.append(item)
       }
+      try Task.checkCancellation()
       try commitItems(updated)
     } catch {
-      for directory in installedDirectories {
+      for file in createdFiles.reversed() {
+        try? fileManager.removeItem(at: file)
+      }
+      for directory in createdDirectories.reversed() {
         try? fileManager.removeItem(at: directory)
       }
       throw error
     }
+    try deleteUnreferencedFiles(from: previousItems, remainingItems: updated)
   }
 
   private func update(id: UUID, mutation: (inout ShelfItem) -> Void) throws {
+    try ensureLoaded()
     guard let index = items.firstIndex(where: { $0.id == id }) else {
       throw RepositoryError.itemNotFound(id)
     }
@@ -346,6 +362,97 @@ public actor ShelfRepository {
     item.updatedAt = date ?? configuration.now()
     item.revision += 1
     item.modifiedByDeviceID = configuration.deviceID
+  }
+
+  private func tombstone(for item: ShelfItem, at date: Date) -> ShelfItem {
+    var tombstone = item
+    tombstone.updatedAt = date
+    tombstone.trashedAt = nil
+    tombstone.deletedAt = date
+    tombstone.fileName = nil
+    tombstone.relativePath = nil
+    tombstone.contentHash = nil
+    tombstone.children = []
+    tombstone.revision += 1
+    tombstone.modifiedByDeviceID = configuration.deviceID
+    return tombstone
+  }
+
+  private func makeSyncRecords(from source: [ShelfItem]) -> [SyncRecord] {
+    source.map { item in
+      var assets: [String: URL] = [:]
+      for nested in flattened([item]) {
+        if let path = nested.relativePath,
+           let url = managedURL(for: path),
+           fileManager.fileExists(atPath: url.path) {
+          assets[path] = url
+        }
+      }
+      return SyncRecord(item: item, assetsByRelativePath: assets)
+    }
+  }
+
+  private func installAssets(
+    in item: inout ShelfItem,
+    from assets: [String: URL],
+    createdFiles: inout [URL],
+    createdDirectories: inout [URL]
+  ) throws {
+    if item.deletedAt != nil {
+      item.fileName = nil
+      item.relativePath = nil
+      item.children = []
+      return
+    }
+    if let remotePath = item.relativePath {
+      let existingURL = managedURL(for: remotePath)
+      if existingURL.map({ fileManager.fileExists(atPath: $0.path) }) != true {
+        guard let assetURL = assets[remotePath] else {
+          item.relativePath = nil
+          return
+        }
+        let proposedName = item.fileName ?? assetURL.lastPathComponent
+        let safeFileName = proposedName.isEmpty
+          ? "Synced File"
+          : URL(fileURLWithPath: proposedName).lastPathComponent
+        let managedDirectory = itemsDirectory
+          .appendingPathComponent(item.id.uuidString, isDirectory: true)
+        let directoryExisted = fileManager.fileExists(atPath: managedDirectory.path)
+        if !directoryExisted {
+          try fileManager.createDirectory(at: managedDirectory, withIntermediateDirectories: true)
+          createdDirectories.append(managedDirectory)
+        }
+        var destination = managedDirectory.appendingPathComponent(safeFileName)
+        if fileManager.fileExists(atPath: destination.path) {
+          destination = managedDirectory
+            .appendingPathComponent("\(UUID().uuidString)-\(safeFileName)")
+        }
+        let stagedDirectory = stagingDirectory
+          .appendingPathComponent("Sync-\(UUID().uuidString)", isDirectory: true)
+        let stagedFile = stagedDirectory.appendingPathComponent(destination.lastPathComponent)
+        try fileManager.createDirectory(at: stagedDirectory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: stagedDirectory) }
+        try fileManager.copyItem(at: assetURL, to: stagedFile)
+        try fileManager.moveItem(at: stagedFile, to: destination)
+        createdFiles.append(destination)
+        item.fileName = destination.lastPathComponent
+        item.relativePath = makeRelativePath(for: destination)
+      }
+    }
+    for index in item.children.indices {
+      try installAssets(
+        in: &item.children[index],
+        from: assets,
+        createdFiles: &createdFiles,
+        createdDirectories: &createdDirectories
+      )
+    }
+  }
+
+  private func ensureLoaded() throws {
+    if !isLoaded {
+      _ = try load()
+    }
   }
 
   private func prepareStorage() throws {
@@ -547,7 +654,7 @@ public actor ShelfRepository {
   }
 
   private func physicalBytesByItemID(_ source: [ShelfItem], now: Date) -> [UUID: Int64] {
-    let liveItems = source.filter { $0.trashedAt == nil }
+    let liveItems = source.filter { $0.trashedAt == nil && $0.deletedAt == nil }
     let expired = liveItems.filter { $0.isExpired(at: now) }.sorted(by: cleanupOrder)
     let expiredIDs = Set(expired.map(\.id))
     let clipboard = liveItems

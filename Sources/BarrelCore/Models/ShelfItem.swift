@@ -52,6 +52,7 @@ public struct ShelfItem: Identifiable, Codable, Hashable, Sendable {
   public var isPinned: Bool
   public var contentHash: String?
   public var trashedAt: Date?
+  public var deletedAt: Date?
   public var revision: Int
   public var modifiedByDeviceID: String
 
@@ -70,6 +71,7 @@ public struct ShelfItem: Identifiable, Codable, Hashable, Sendable {
     isPinned: Bool = false,
     contentHash: String? = nil,
     trashedAt: Date? = nil,
+    deletedAt: Date? = nil,
     revision: Int = 0,
     modifiedByDeviceID: String = ""
   ) {
@@ -87,6 +89,7 @@ public struct ShelfItem: Identifiable, Codable, Hashable, Sendable {
     self.isPinned = isPinned
     self.contentHash = contentHash
     self.trashedAt = trashedAt
+    self.deletedAt = deletedAt
     self.revision = revision
     self.modifiedByDeviceID = modifiedByDeviceID
   }
@@ -107,11 +110,13 @@ public struct ShelfItem: Identifiable, Codable, Hashable, Sendable {
     isPinned = try container.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
     contentHash = try container.decodeIfPresent(String.self, forKey: .contentHash)
     trashedAt = try container.decodeIfPresent(Date.self, forKey: .trashedAt)
+    deletedAt = try container.decodeIfPresent(Date.self, forKey: .deletedAt)
     revision = try container.decodeIfPresent(Int.self, forKey: .revision) ?? 0
     modifiedByDeviceID = try container.decodeIfPresent(String.self, forKey: .modifiedByDeviceID) ?? ""
   }
 
   public var isStack: Bool { kind == .stack }
+  public var isPermanentlyDeleted: Bool { deletedAt != nil }
 
   public var detail: String {
     if isStack {

@@ -158,7 +158,8 @@ final class ShelfRepositoryTests: XCTestCase {
     try await repository.emptyTrash()
 
     let snapshot = await repository.snapshot()
-    XCTAssertEqual(snapshot.map(\.id), [second.id])
+    XCTAssertEqual(ShelfFilter.all.filter(snapshot, query: "").map(\.id), [second.id])
+    XCTAssertNotNil(snapshot.first(where: { $0.id == first.id })?.deletedAt)
     XCTAssertTrue(fileManager.fileExists(atPath: sharedFileURL.path))
   }
 
@@ -172,8 +173,8 @@ final class ShelfRepositoryTests: XCTestCase {
     try await repository.deletePermanently(ids: [first.id])
 
     let snapshot = await repository.snapshot()
-    XCTAssertEqual(snapshot.map(\.id), [second.id])
-    XCTAssertNotNil(snapshot.first?.trashedAt)
+    XCTAssertEqual(ShelfFilter.trash.filter(snapshot, query: "").map(\.id), [second.id])
+    XCTAssertNotNil(snapshot.first(where: { $0.id == first.id })?.deletedAt)
   }
 
   func testLoadRemovesUnreferencedManagedDirectory() async throws {
@@ -365,12 +366,190 @@ final class ShelfRepositoryTests: XCTestCase {
 
     try await repository.applySyncRecords([SyncRecord(item: remoteItem, assetURL: remoteAsset)])
 
-    let records = await repository.syncRecords()
+    let records = try await repository.syncRecords()
     let record = try XCTUnwrap(records.first)
     let managedURL = try XCTUnwrap(record.assetURL)
     XCTAssertEqual(record.item.id, remoteItem.id)
     XCTAssertEqual(try Data(contentsOf: managedURL), Data("remote bytes".utf8))
     XCTAssertTrue(managedURL.path.hasPrefix(root.appendingPathComponent("Items").path + "/"))
+  }
+
+  func testColdMutationLoadsExistingManifestBeforeCommit() async throws {
+    let root = try makeRoot()
+    let firstRepository = ShelfRepository(configuration: configuration(root: root))
+    let existing = try await firstRepository.addText(
+      "Existing",
+      kind: .text,
+      origin: .imported,
+      expiresAt: nil
+    )
+    let coldRepository = ShelfRepository(configuration: configuration(root: root))
+
+    let added = try await coldRepository.addText(
+      "Added from intent",
+      kind: .text,
+      origin: .shortcut,
+      expiresAt: nil
+    )
+
+    let snapshot = await coldRepository.snapshot()
+    XCTAssertEqual(Set(snapshot.map(\.id)), Set([existing.id, added.id]))
+  }
+
+  func testApplySyncRecordsMergesWithChangesMadeAfterNetworkSnapshot() async throws {
+    let root = try makeRoot()
+    let repository = ShelfRepository(configuration: configuration(root: root))
+    let original = try await repository.addText(
+      "Original",
+      kind: .text,
+      origin: .imported,
+      expiresAt: nil
+    )
+    let staleNetworkResult = try await repository.syncRecords()
+    let concurrent = try await repository.addText(
+      "Concurrent import",
+      kind: .text,
+      origin: .imported,
+      expiresAt: nil
+    )
+    try await repository.rename(id: original.id, title: "Renamed while syncing")
+
+    try await repository.applySyncRecords(staleNetworkResult)
+
+    let snapshot = await repository.snapshot()
+    XCTAssertEqual(Set(snapshot.map(\.id)), Set([original.id, concurrent.id]))
+    XCTAssertEqual(snapshot.first(where: { $0.id == original.id })?.title, "Renamed while syncing")
+  }
+
+  func testPermanentDeletionCreatesTombstoneAndPreventsRemoteResurrection() async throws {
+    let root = try makeRoot()
+    let source = try makeSource(named: "delete.txt", contents: "delete me")
+    let clock = TestClock(now)
+    let repository = ShelfRepository(configuration: configuration(root: root, now: { clock.date }))
+    let imported = await repository.importFiles([source], origin: .imported, expiresAt: nil)
+    let item = try XCTUnwrap(imported.successes.first)
+    let resolvedURL = await repository.fileURL(for: item)
+    let managedURL = try XCTUnwrap(resolvedURL)
+    try await repository.trash(ids: [item.id])
+    clock.date = now.addingTimeInterval(60)
+
+    try await repository.emptyTrash()
+
+    var snapshot = await repository.snapshot()
+    let tombstone = try XCTUnwrap(snapshot.first(where: { $0.id == item.id }))
+    XCTAssertEqual(tombstone.deletedAt, clock.date)
+    XCTAssertFalse(fileManager.fileExists(atPath: managedURL.path))
+    XCTAssertTrue(ShelfFilter.all.filter(snapshot, query: "").isEmpty)
+    XCTAssertTrue(ShelfFilter.trash.filter(snapshot, query: "").isEmpty)
+
+    try await repository.applySyncRecords([SyncRecord(item: item)])
+
+    snapshot = await repository.snapshot()
+    XCTAssertNotNil(snapshot.first(where: { $0.id == item.id })?.deletedAt)
+  }
+
+  func testNestedStackAssetsRoundTripByRelativePath() async throws {
+    let root = try makeRoot()
+    let firstAsset = try makeSource(named: "first.txt", contents: "first bytes")
+    let secondAsset = try makeSource(named: "second.txt", contents: "second bytes")
+    let firstPath = "Items/remote-first/first.txt"
+    let secondPath = "Items/remote-second/second.txt"
+    let first = ShelfItem(
+      id: UUID(),
+      title: "First",
+      kind: .file,
+      createdAt: now,
+      updatedAt: now,
+      fileName: "first.txt",
+      relativePath: firstPath,
+      revision: 1,
+      modifiedByDeviceID: "remote"
+    )
+    let second = ShelfItem(
+      id: UUID(),
+      title: "Second",
+      kind: .file,
+      createdAt: now,
+      updatedAt: now,
+      fileName: "second.txt",
+      relativePath: secondPath,
+      revision: 1,
+      modifiedByDeviceID: "remote"
+    )
+    let stack = ShelfItem(
+      id: UUID(),
+      title: "Stack",
+      kind: .stack,
+      createdAt: now,
+      updatedAt: now,
+      children: [first, second],
+      revision: 1,
+      modifiedByDeviceID: "remote"
+    )
+    let repository = ShelfRepository(configuration: configuration(root: root))
+
+    try await repository.applySyncRecords([
+      SyncRecord(
+        item: stack,
+        assetsByRelativePath: [firstPath: firstAsset, secondPath: secondAsset]
+      )
+    ])
+
+    let records = try await repository.syncRecords()
+    let record = try XCTUnwrap(records.first)
+    XCTAssertEqual(record.assetsByRelativePath.count, 2)
+    XCTAssertEqual(
+      Set(try record.assetsByRelativePath.values.map { try String(contentsOf: $0, encoding: .utf8) }),
+      Set(["first bytes", "second bytes"])
+    )
+  }
+
+  func testFailedSyncApplyPreservesPreexistingItemDirectory() async throws {
+    let root = try makeRoot()
+    let failure = ManifestFailureSwitch()
+    let repository = ShelfRepository(
+      configuration: configuration(
+        root: root,
+        manifestWriter: { data, destination in
+          if failure.shouldFail { throw TestError.writeFailed }
+          try RepositoryConfiguration.defaultManifestWriter(data, destination)
+        }
+      )
+    )
+    _ = try await repository.load()
+    let itemID = UUID()
+    let existingDirectory = root
+      .appendingPathComponent("Items", isDirectory: true)
+      .appendingPathComponent(itemID.uuidString, isDirectory: true)
+    try fileManager.createDirectory(at: existingDirectory, withIntermediateDirectories: true)
+    let sentinel = existingDirectory.appendingPathComponent("keep.txt")
+    try Data("keep".utf8).write(to: sentinel)
+    let asset = try makeSource(named: "incoming.txt", contents: "incoming")
+    let remotePath = "Items/remote/incoming.txt"
+    let item = ShelfItem(
+      id: itemID,
+      title: "Incoming",
+      kind: .file,
+      createdAt: now,
+      updatedAt: now,
+      fileName: "incoming.txt",
+      relativePath: remotePath,
+      revision: 1,
+      modifiedByDeviceID: "remote"
+    )
+    failure.shouldFail = true
+
+    do {
+      try await repository.applySyncRecords([
+        SyncRecord(item: item, assetsByRelativePath: [remotePath: asset])
+      ])
+      XCTFail("Expected manifest write failure")
+    } catch TestError.writeFailed {
+      // Expected.
+    }
+
+    XCTAssertTrue(fileManager.fileExists(atPath: sentinel.path))
+    XCTAssertEqual(try Data(contentsOf: sentinel), Data("keep".utf8))
   }
 
   private func configuration(
@@ -435,5 +614,15 @@ private final class TestClock: @unchecked Sendable {
   var date: Date {
     get { lock.withLock { storedDate } }
     set { lock.withLock { storedDate = newValue } }
+  }
+}
+
+private final class ManifestFailureSwitch: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storedShouldFail = false
+
+  var shouldFail: Bool {
+    get { lock.withLock { storedShouldFail } }
+    set { lock.withLock { storedShouldFail = newValue } }
   }
 }
