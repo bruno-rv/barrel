@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
   @ObservedObject var store: ShelfStore
+  @ObservedObject var syncController: SyncController
   @AppStorage("CaptureClipboardHistory") private var captureClipboardHistory = false
   @AppStorage("ClipboardLifetimeHours") private var clipboardLifetimeHours = 24
   @AppStorage("StorageQuotaBytes") private var storageQuotaBytes = 1_073_741_824
@@ -9,6 +10,7 @@ struct SettingsView: View {
   @AppStorage("ShelfEdge") private var shelfEdge = "left"
   @AppStorage("GlobalHotKeyEnabled") private var globalHotKeyEnabled = true
   @AppStorage("GlobalHotKeyChoice") private var globalHotKeyChoice = GlobalHotKeyChoice.controlOptionSpace.rawValue
+  @AppStorage("CloudSyncEnabled") private var cloudSyncEnabled = false
 
   var body: some View {
     Form {
@@ -64,6 +66,20 @@ struct SettingsView: View {
           .foregroundStyle(.secondary)
       }
 
+      Section("Multi-Mac Sync") {
+        Toggle("Enable CloudKit sync", isOn: $cloudSyncEnabled)
+        LabeledContent("Container", value: syncController.containerIdentifier)
+        LabeledContent("Status", value: syncController.statusText)
+        Button("Sync Now") {
+          syncController.syncNow()
+        }
+        .disabled(!syncController.canSync)
+
+        Text("Sync is off by default. Enabling it requires a provisioned Apple Developer Team, the matching iCloud container, and CloudKit entitlements. If those capabilities are unavailable, Barrel continues storing items locally.")
+          .font(.footnote)
+          .foregroundStyle(.secondary)
+      }
+
       Text("Barrel stores imported copies in Application Support and keeps original files untouched. Deleted items remain recoverable in Trash until emptied or removed after seven days.")
         .font(.footnote)
         .foregroundStyle(.secondary)
@@ -73,12 +89,16 @@ struct SettingsView: View {
     .onAppear {
       store.setClipboardCapture(enabled: captureClipboardHistory)
       store.setStorageQuota(storageQuotaBytes)
+      syncController.setEnabled(cloudSyncEnabled)
     }
     .onChange(of: captureClipboardHistory) {
       store.setClipboardCapture(enabled: captureClipboardHistory)
     }
     .onChange(of: storageQuotaBytes) {
       store.setStorageQuota(storageQuotaBytes)
+    }
+    .onChange(of: cloudSyncEnabled) {
+      syncController.setEnabled(cloudSyncEnabled)
     }
   }
 
@@ -88,5 +108,5 @@ struct SettingsView: View {
 }
 
 #Preview {
-  SettingsView(store: .preview)
+  SettingsView(store: .preview, syncController: SyncController())
 }

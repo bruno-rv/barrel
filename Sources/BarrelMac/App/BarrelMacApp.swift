@@ -7,6 +7,7 @@ import SwiftUI
 struct BarrelMacApp: App {
   @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
   @StateObject private var store = ShelfStore()
+  @StateObject private var syncController = SyncController()
 
   var body: some Scene {
     WindowGroup("Barrel", id: "main") {
@@ -78,7 +79,7 @@ struct BarrelMacApp: App {
     }
 
     Settings {
-      SettingsView(store: store)
+      SettingsView(store: store, syncController: syncController)
     }
   }
 }
