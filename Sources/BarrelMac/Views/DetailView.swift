@@ -105,6 +105,21 @@ struct DetailView: View {
 
   private func actions(_ item: ShelfItem) -> some View {
     HStack {
+      if item.trashedAt != nil {
+        Button {
+          store.restore(item)
+        } label: {
+          Label("Restore", systemImage: "arrow.uturn.backward")
+        }
+
+        Spacer()
+
+        Button(role: .destructive) {
+          store.deletePermanently(item)
+        } label: {
+          Label("Delete Permanently", systemImage: "trash.slash")
+        }
+      } else {
       Button {
         store.rename(item, title: renameText)
       } label: {
@@ -133,12 +148,28 @@ struct DetailView: View {
         }
       }
 
+      Button {
+        store.setPinned(item, isPinned: !item.isPinned)
+      } label: {
+        Label(item.isPinned ? "Unpin" : "Pin", systemImage: item.isPinned ? "pin.slash" : "pin")
+      }
+
+      Menu {
+        Button("One Hour") { store.setExpiration(item, preset: .oneHour) }
+        Button("One Day") { store.setExpiration(item, preset: .oneDay) }
+        Button("One Week") { store.setExpiration(item, preset: .oneWeek) }
+        Button("Never") { store.setExpiration(item, preset: .never) }
+      } label: {
+        Label("Expiration", systemImage: "clock")
+      }
+
       Spacer()
 
       Button(role: .destructive) {
         store.trash(item)
       } label: {
-        Label("Delete", systemImage: "trash")
+        Label("Move to Trash", systemImage: "trash")
+      }
       }
     }
   }
@@ -178,6 +209,16 @@ struct DetailView: View {
         GridRow {
           Text("Type").foregroundStyle(.secondary)
           Text(item.kind.label)
+        }
+        GridRow {
+          Text("Retention").foregroundStyle(.secondary)
+          if item.isPinned {
+            Text("Pinned")
+          } else if let expiresAt = item.expiresAt {
+            Text("Expires \(expiresAt.formatted(date: .abbreviated, time: .shortened))")
+          } else {
+            Text("Never expires")
+          }
         }
       }
     }

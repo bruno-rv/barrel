@@ -5,6 +5,7 @@ public actor ShelfRepository {
   private let configuration: RepositoryConfiguration
   private let fileManager: FileManager
   private var items: [ShelfItem] = []
+  private var quotaBytes: Int64
 
   private var itemsDirectory: URL {
     configuration.rootURL.appendingPathComponent("Items", isDirectory: true)
@@ -21,6 +22,7 @@ public actor ShelfRepository {
   public init(configuration: RepositoryConfiguration, fileManager: FileManager = .default) {
     self.configuration = configuration
     self.fileManager = fileManager
+    quotaBytes = configuration.quotaBytes
   }
 
   @discardableResult
@@ -54,6 +56,10 @@ public actor ShelfRepository {
 
   public func snapshot() -> [ShelfItem] {
     items
+  }
+
+  public func setStorageQuota(_ bytes: Int64) {
+    quotaBytes = max(bytes, 0)
   }
 
   public func importFiles(
@@ -208,6 +214,17 @@ public actor ShelfRepository {
     try deleteUnreferencedFiles(from: removed, remainingItems: remaining)
   }
 
+  public func deletePermanently(ids: [UUID]) throws {
+    let targetIDs = Set(ids)
+    let removed = items.filter { targetIDs.contains($0.id) && $0.trashedAt != nil }
+    guard !removed.isEmpty else { return }
+    let remaining = items.filter { item in
+      !targetIDs.contains(item.id) || item.trashedAt == nil
+    }
+    try commitItems(remaining)
+    try deleteUnreferencedFiles(from: removed, remainingItems: remaining)
+  }
+
   public func cleanup() throws {
     let now = configuration.now()
     let trashCutoff = now.addingTimeInterval(-configuration.trashRetention)
@@ -223,7 +240,7 @@ public actor ShelfRepository {
         items: updated,
         now: now,
         bytesByItemID: sizes,
-        quotaBytes: configuration.quotaBytes
+        quotaBytes: quotaBytes
       )
     )
     for index in updated.indices where candidates.contains(updated[index].id) {

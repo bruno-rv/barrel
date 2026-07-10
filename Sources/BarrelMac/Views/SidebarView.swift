@@ -28,23 +28,29 @@ struct SidebarView: View {
               store.itemProvider(for: item)
             }
             .contextMenu {
-              Button("Mark for Stack") {
-                store.toggleSelection(for: item)
-              }
-              if item.isStack {
-                Button("Split Stack") {
-                  store.splitStack(item)
+              if item.trashedAt != nil {
+                Button("Restore") { store.restore(item) }
+                Button("Delete Permanently", role: .destructive) {
+                  store.deletePermanently(item)
                 }
-              }
-              Button("Reveal in Finder") {
-                store.reveal(item)
-              }
-              Button("Open") {
-                store.open(item)
-              }
-              Divider()
-              Button("Delete", role: .destructive) {
-                store.trash(item)
+              } else {
+                Button("Mark for Stack") { store.toggleSelection(for: item) }
+                if item.isStack {
+                  Button("Split Stack") { store.splitStack(item) }
+                }
+                Button(item.isPinned ? "Unpin" : "Pin") {
+                  store.setPinned(item, isPinned: !item.isPinned)
+                }
+                Menu("Expiration") {
+                  Button("One Hour") { store.setExpiration(item, preset: .oneHour) }
+                  Button("One Day") { store.setExpiration(item, preset: .oneDay) }
+                  Button("One Week") { store.setExpiration(item, preset: .oneWeek) }
+                  Button("Never") { store.setExpiration(item, preset: .never) }
+                }
+                Button("Reveal in Finder") { store.reveal(item) }
+                Button("Open") { store.open(item) }
+                Divider()
+                Button("Move to Trash", role: .destructive) { store.trash(item) }
               }
             }
           }
@@ -92,6 +98,12 @@ private struct ShelfRow: View {
       if isMarked {
         Image(systemName: "checkmark.circle.fill")
           .foregroundStyle(Color.accentColor)
+      } else if item.isPinned {
+        Image(systemName: "pin.fill")
+          .foregroundStyle(.secondary)
+      } else if item.expiresAt != nil {
+        Image(systemName: "clock")
+          .foregroundStyle(.secondary)
       } else if item.isStack {
         Text("\(item.children.count)")
           .font(.caption2.weight(.bold))

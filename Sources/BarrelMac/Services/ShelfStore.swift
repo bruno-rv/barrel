@@ -224,6 +224,17 @@ final class ShelfStore: ObservableObject {
     }
   }
 
+  func deletePermanently(_ item: ShelfItem) {
+    Task {
+      do {
+        try await repository.deletePermanently(ids: [item.id])
+        await refresh()
+      } catch {
+        errorMessage = error.localizedDescription
+      }
+    }
+  }
+
   func cleanup() {
     Task {
       do {
@@ -232,6 +243,12 @@ final class ShelfStore: ObservableObject {
       } catch {
         errorMessage = error.localizedDescription
       }
+    }
+  }
+
+  func setStorageQuota(_ bytes: Int) {
+    Task {
+      await repository.setStorageQuota(Int64(bytes))
     }
   }
 

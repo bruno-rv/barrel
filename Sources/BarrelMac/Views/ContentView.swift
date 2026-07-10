@@ -104,7 +104,7 @@ struct ContentView: View {
         .textFieldStyle(.roundedBorder)
 
       HStack(spacing: 6) {
-        ForEach([ShelfFilter.all, .files, .images, .links, .text, .stacks]) { filter in
+        ForEach([ShelfFilter.all, .files, .images, .links, .text, .stacks, .trash]) { filter in
           Button {
             store.filter = filter
           } label: {
@@ -137,7 +137,11 @@ struct ContentView: View {
             open: { store.open(item) },
             reveal: { store.reveal(item) },
             split: { store.splitStack(item) },
-            delete: { store.trash(item) },
+            pin: { store.setPinned(item, isPinned: !item.isPinned) },
+            expire: { store.setExpiration(item, preset: $0) },
+            trash: { store.trash(item) },
+            restore: { store.restore(item) },
+            deletePermanently: { store.deletePermanently(item) },
             itemProvider: { store.itemProvider(for: item) }
           )
         }
@@ -182,21 +186,30 @@ struct ContentView: View {
       }
       .help("Paste into shelf")
 
-      Button {
-        store.stackSelectedItems()
-      } label: {
-        Image(systemName: "square.stack.3d.up")
-      }
-      .disabled(store.selectedIDs.count < 2)
-      .help("Stack marked items")
+      if store.filter == .trash {
+        Button(role: .destructive) {
+          store.emptyTrash()
+        } label: {
+          Image(systemName: "trash.slash")
+        }
+        .help("Empty Trash")
+      } else {
+        Button {
+          store.stackSelectedItems()
+        } label: {
+          Image(systemName: "square.stack.3d.up")
+        }
+        .disabled(store.selectedIDs.count < 2)
+        .help("Stack marked items")
 
-      Button(role: .destructive) {
-        store.trashSelectedItems()
-      } label: {
-        Image(systemName: "trash")
+        Button(role: .destructive) {
+          store.trashSelectedItems()
+        } label: {
+          Image(systemName: "trash")
+        }
+        .disabled(store.selectedIDs.isEmpty)
+        .help("Move marked items to Trash")
       }
-      .disabled(store.selectedIDs.isEmpty)
-      .help("Delete marked items")
 
       Spacer()
 
@@ -236,7 +249,11 @@ private struct ShelfTile: View {
   let open: () -> Void
   let reveal: () -> Void
   let split: () -> Void
-  let delete: () -> Void
+  let pin: () -> Void
+  let expire: (ShelfExpirationPreset) -> Void
+  let trash: () -> Void
+  let restore: () -> Void
+  let deletePermanently: () -> Void
   let itemProvider: () -> NSItemProvider
 
   var body: some View {
@@ -253,6 +270,16 @@ private struct ShelfTile: View {
           .font(.caption)
           .foregroundStyle(.white.opacity(0.58))
           .lineLimit(1)
+
+        if item.isPinned {
+          Label("Pinned", systemImage: "pin.fill")
+            .font(.caption2)
+            .foregroundStyle(.white.opacity(0.72))
+        } else if let expiresAt = item.expiresAt {
+          Text("Expires \(expiresAt, style: .relative)")
+            .font(.caption2)
+            .foregroundStyle(.white.opacity(0.72))
+        }
       }
 
       Spacer(minLength: 8)
@@ -275,16 +302,28 @@ private struct ShelfTile: View {
     .onTapGesture(count: 2, perform: open)
     .onDrag(itemProvider)
     .contextMenu {
-      Button(isMarked ? "Unmark" : "Mark for Stack", action: toggleMark)
-      Button("Open", action: open)
-      if fileURL != nil {
-        Button("Reveal in Finder", action: reveal)
+      if item.trashedAt != nil {
+        Button("Restore", action: restore)
+        Button("Delete Permanently", role: .destructive, action: deletePermanently)
+      } else {
+        Button(isMarked ? "Unmark" : "Mark for Stack", action: toggleMark)
+        Button("Open", action: open)
+        if fileURL != nil {
+          Button("Reveal in Finder", action: reveal)
+        }
+        if item.isStack {
+          Button("Split Stack", action: split)
+        }
+        Button(item.isPinned ? "Unpin" : "Pin", action: pin)
+        Menu("Expiration") {
+          Button("One Hour") { expire(.oneHour) }
+          Button("One Day") { expire(.oneDay) }
+          Button("One Week") { expire(.oneWeek) }
+          Button("Never") { expire(.never) }
+        }
+        Divider()
+        Button("Move to Trash", role: .destructive, action: trash)
       }
-      if item.isStack {
-        Button("Split Stack", action: split)
-      }
-      Divider()
-      Button("Delete", role: .destructive, action: delete)
     }
   }
 

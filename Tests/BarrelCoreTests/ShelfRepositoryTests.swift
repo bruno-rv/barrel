@@ -138,6 +138,20 @@ final class ShelfRepositoryTests: XCTestCase {
     XCTAssertTrue(fileManager.fileExists(atPath: sharedFileURL.path))
   }
 
+  func testDeletePermanentlyRemovesOnlySelectedTrashItem() async throws {
+    let root = try makeRoot()
+    let repository = ShelfRepository(configuration: configuration(root: root))
+    let first = try await repository.addText("First", kind: .text, origin: .imported, expiresAt: nil)
+    let second = try await repository.addText("Second", kind: .text, origin: .imported, expiresAt: nil)
+    try await repository.trash(ids: [first.id, second.id])
+
+    try await repository.deletePermanently(ids: [first.id])
+
+    let snapshot = await repository.snapshot()
+    XCTAssertEqual(snapshot.map(\.id), [second.id])
+    XCTAssertNotNil(snapshot.first?.trashedAt)
+  }
+
   func testLoadRemovesUnreferencedManagedDirectory() async throws {
     let root = try makeRoot()
     let orphanDirectory = root
@@ -230,6 +244,20 @@ final class ShelfRepositoryTests: XCTestCase {
     let snapshot = await repository.snapshot()
     XCTAssertEqual(snapshot.count, 2)
     XCTAssertTrue(snapshot.allSatisfy { $0.trashedAt == nil })
+  }
+
+  func testUpdatedStorageQuotaIsUsedByCleanup() async throws {
+    let root = try makeRoot()
+    let source = try makeSource(named: "clipboard.txt", contents: "123456")
+    let repository = ShelfRepository(configuration: configuration(root: root, quotaBytes: 100))
+    let outcome = await repository.importFiles([source], origin: .clipboard, expiresAt: nil)
+    let item = try XCTUnwrap(outcome.successes.first)
+
+    await repository.setStorageQuota(0)
+    try await repository.cleanup()
+
+    let snapshot = await repository.snapshot()
+    XCTAssertNotNil(snapshot.first(where: { $0.id == item.id })?.trashedAt)
   }
 
   func testClipboardStackInheritsClipboardRetention() async throws {

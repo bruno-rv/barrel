@@ -77,7 +77,7 @@ struct BarrelMacApp: App {
     }
 
     Settings {
-      SettingsView()
+      SettingsView(store: store)
     }
   }
 }
