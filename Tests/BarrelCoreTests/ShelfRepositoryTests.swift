@@ -448,6 +448,47 @@ final class ShelfRepositoryTests: XCTestCase {
     XCTAssertNotNil(snapshot.first(where: { $0.id == item.id })?.deletedAt)
   }
 
+  func testPermanentDeletionTombstoneScrubsPrivateContent() async throws {
+    let root = try makeRoot()
+    let asset = try makeSource(named: "private.txt", contents: "private bytes")
+    let remotePath = "Items/remote/private.txt"
+    let item = ShelfItem(
+      id: UUID(),
+      title: "Private project codename",
+      kind: .stack,
+      createdAt: now,
+      updatedAt: now,
+      fileName: "private.txt",
+      relativePath: remotePath,
+      text: "Sensitive copied text",
+      children: [ShelfItem(title: "Secret child", kind: .text, text: "Child secret")],
+      origin: .sync,
+      contentHash: "sensitive-hash",
+      revision: 7,
+      modifiedByDeviceID: "remote-mac"
+    )
+    let repository = ShelfRepository(configuration: configuration(root: root))
+    try await repository.applySyncRecords([
+      SyncRecord(item: item, assetsByRelativePath: [remotePath: asset])
+    ])
+    try await repository.trash(ids: [item.id])
+
+    try await repository.deletePermanently(ids: [item.id])
+
+    let snapshot = await repository.snapshot()
+    let tombstone = try XCTUnwrap(snapshot.first(where: { $0.id == item.id }))
+    XCTAssertEqual(tombstone.id, item.id)
+    XCTAssertEqual(tombstone.title, "Deleted Item")
+    XCTAssertNil(tombstone.text)
+    XCTAssertNil(tombstone.fileName)
+    XCTAssertNil(tombstone.relativePath)
+    XCTAssertNil(tombstone.contentHash)
+    XCTAssertTrue(tombstone.children.isEmpty)
+    XCTAssertNotNil(tombstone.deletedAt)
+    XCTAssertGreaterThan(tombstone.revision, item.revision)
+    XCTAssertEqual(tombstone.modifiedByDeviceID, "test-mac")
+  }
+
   func testNestedStackAssetsRoundTripByRelativePath() async throws {
     let root = try makeRoot()
     let firstAsset = try makeSource(named: "first.txt", contents: "first bytes")

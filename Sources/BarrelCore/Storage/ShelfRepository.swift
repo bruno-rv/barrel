@@ -366,7 +366,14 @@ public actor ShelfRepository {
 
   private func tombstone(for item: ShelfItem, at date: Date) -> ShelfItem {
     var tombstone = item
+    tombstone.title = "Deleted Item"
+    tombstone.kind = .file
+    tombstone.createdAt = date
     tombstone.updatedAt = date
+    tombstone.text = nil
+    tombstone.origin = .sync
+    tombstone.expiresAt = nil
+    tombstone.isPinned = false
     tombstone.trashedAt = nil
     tombstone.deletedAt = date
     tombstone.fileName = nil
