@@ -1,6 +1,7 @@
 import BarrelCore
 import CloudKit
 import Foundation
+import Security
 
 @MainActor
 final class SyncController: ObservableObject {
@@ -17,15 +18,11 @@ final class SyncController: ObservableObject {
   let containerIdentifier = CloudKitSyncService.defaultContainerIdentifier
 
   private let repository: ShelfRepository
-  private let container: CKContainer
-  private let transport: CloudKitSyncService
   private var syncTask: Task<Void, Never>?
   private var enabled = false
 
   init(repository: ShelfRepository = BarrelEnvironment.shared.repository) {
     self.repository = repository
-    container = CKContainer(identifier: CloudKitSyncService.defaultContainerIdentifier)
-    transport = CloudKitSyncService()
   }
 
   var statusText: String {
@@ -62,7 +59,15 @@ final class SyncController: ObservableObject {
 
   private func synchronize() async {
     status = .syncing
+    guard hasRequiredEntitlements else {
+      status = .unavailable(
+        "The app is not signed for the \(containerIdentifier) CloudKit container."
+      )
+      return
+    }
     do {
+      let container = CKContainer(identifier: containerIdentifier)
+      let transport = CloudKitSyncService(containerIdentifier: containerIdentifier)
       let accountStatus = try await container.accountStatus()
       guard accountStatus == .available else {
         status = .unavailable(accountStatus.reason)
@@ -81,6 +86,18 @@ final class SyncController: ObservableObject {
     } catch {
       status = .failed(error.localizedDescription)
     }
+  }
+
+  private var hasRequiredEntitlements: Bool {
+    guard let task = SecTaskCreateFromSelf(nil),
+          let identifiers = SecTaskCopyValueForEntitlement(
+            task,
+            "com.apple.developer.icloud-container-identifiers" as CFString,
+            nil
+          ) as? [String] else {
+      return false
+    }
+    return identifiers.contains(containerIdentifier)
   }
 }
 
