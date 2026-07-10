@@ -20,8 +20,6 @@ if [[ -d /Applications/Xcode.app/Contents/Developer ]]; then
   export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 fi
 
-pkill -x "$APP_NAME" >/dev/null 2>&1 || true
-
 cd "$ROOT_DIR"
 swift build
 BUILD_BINARY="$(swift build --show-bin-path)/$APP_NAME"
@@ -79,9 +77,50 @@ case "$MODE" in
     /usr/bin/log stream --info --style compact --predicate "subsystem == \"$BUNDLE_ID\""
     ;;
   --verify|verify)
-    open_app
+    [[ -d "$APP_BUNDLE" ]] || { echo "missing app bundle: $APP_BUNDLE" >&2; exit 1; }
+    [[ -x "$APP_BINARY" ]] || { echo "missing app executable: $APP_BINARY" >&2; exit 1; }
+    [[ -f "$APP_RESOURCES/AppIcon.icns" ]] || { echo "missing app icon" >&2; exit 1; }
+    [[ -f "$INFO_PLIST" ]] || { echo "missing Info.plist" >&2; exit 1; }
+    /usr/bin/plutil -lint "$INFO_PLIST" >/dev/null
+
+    VERIFY_LOG="$(mktemp -t barrel-verify.XXXXXX)"
+    VERIFY_PID=""
+    cleanup_verify() {
+      if [[ -n "$VERIFY_PID" ]] && kill -0 "$VERIFY_PID" 2>/dev/null; then
+        kill -TERM "$VERIFY_PID" 2>/dev/null || true
+        wait "$VERIFY_PID" 2>/dev/null || true
+      fi
+      rm -f "$VERIFY_LOG"
+    }
+    trap cleanup_verify EXIT
+
+    "$APP_BINARY" >"$VERIFY_LOG" 2>&1 &
+    VERIFY_PID=$!
+    for _ in {1..20}; do
+      if kill -0 "$VERIFY_PID" 2>/dev/null; then
+        break
+      fi
+      sleep 0.25
+    done
+    if ! kill -0 "$VERIFY_PID" 2>/dev/null; then
+      cat "$VERIFY_LOG" >&2
+      echo "verification launch exited before its PID became live" >&2
+      exit 1
+    fi
     sleep 1
-    pgrep -x "$APP_NAME" >/dev/null
+    if ! kill -0 "$VERIFY_PID" 2>/dev/null; then
+      cat "$VERIFY_LOG" >&2
+      echo "verification process exited during the launch check" >&2
+      exit 1
+    fi
+    VERIFY_COMMAND="$(/bin/ps -p "$VERIFY_PID" -o comm= | xargs)"
+    [[ "$VERIFY_COMMAND" == "$APP_BINARY" ]] || {
+      echo "unexpected process for PID $VERIFY_PID: $VERIFY_COMMAND" >&2
+      exit 1
+    }
+    echo "verified $APP_BUNDLE with PID $VERIFY_PID"
+    cleanup_verify
+    trap - EXIT
     ;;
   *)
     echo "usage: $0 [run|--debug|--logs|--telemetry|--verify]" >&2

@@ -514,26 +514,36 @@ git commit -m "feat: add optional multi-Mac sync"
 - Modify: `README.md`
 - Modify: `script/build_and_run.sh`
 - Modify: `Makefile`
-- Create: `docs/CLOUDKIT_SETUP.md`
-- Create: `docs/PRIVACY.md`
+- Create: `docs/cloudkit-setup.md`
+- Create: `docs/privacy.md`
 
 **Interfaces:**
-- Produces: accurate build, privacy, hotkey, retention, and optional CloudKit setup documentation.
-- Produces: a verification mode that builds and inspects the app without requiring CloudKit entitlements.
+- Produces: accurate build, privacy, hotkey, retention, and optional CloudKit
+  setup documentation.
+- Produces: a verification mode that builds and inspects the app without
+  requiring CloudKit entitlements.
 
-- [ ] **Step 1: Update user and developer documentation**
+- [x] **Step 1: Update user and developer documentation**
 
-Document macOS-only support, import and capture flows, default-off clipboard behavior, 24-hour clipboard expiry, trash retention, quota behavior, global shortcut choices, App Intents, Spotlight, and the exact commands `make app`, `make verify`, and `swift test`.
+Document macOS-only support, import and capture flows, default-off clipboard
+behavior, 24-hour clipboard expiry, trash retention, quota behavior, global
+shortcut choices, App Intents, Spotlight, and the exact commands `make app`,
+`make verify`, and `swift test`.
 
-- [ ] **Step 2: Document CloudKit activation**
+- [x] **Step 2: Document CloudKit activation**
 
-`docs/CLOUDKIT_SETUP.md` must list the placeholder container `iCloud.dev.bruno.barrel`, required Developer Team, iCloud capability, CloudKit container creation, entitlements, production schema deployment, and the expectation that sync remains disabled without them.
+`docs/cloudkit-setup.md` must list the placeholder container
+`iCloud.dev.bruno.barrel`, required Developer Team, iCloud capability, CloudKit
+container creation, entitlements, production schema deployment, and the
+expectation that sync remains disabled without them.
 
-- [ ] **Step 3: Harden the verification script**
+- [x] **Step 3: Harden the verification script**
 
-Keep full-Xcode `DEVELOPER_DIR` selection. In `--verify`, assert the app bundle, executable, icon, and Info.plist exist; run the executable long enough to confirm a live process; then terminate only the process started by the script.
+Keep full-Xcode `DEVELOPER_DIR` selection. In `--verify`, assert the app bundle,
+executable, icon, and Info.plist exist; run the executable long enough to
+confirm a live process; then terminate only the process started by the script.
 
-- [ ] **Step 4: Run fresh acceptance verification**
+- [x] **Step 4: Run fresh acceptance verification**
 
 Run:
 
@@ -546,15 +556,19 @@ rg -n "scheduledTimer|NSImage\(contentsOf:" Sources/BarrelMac
 git status --short
 ```
 
-Expected: tests and builds succeed; bundle verification succeeds; both `rg` commands return no matches; Git status contains only intentional plan-tracking changes.
+Expected: tests and builds succeed; bundle verification succeeds; both `rg`
+commands return no matches; Git status contains only intentional plan-tracking
+changes.
 
-- [ ] **Step 5: Commit documentation and verification**
+- [x] **Step 5: Commit documentation and verification**
 
 ```bash
 git add README.md Makefile script docs
 git commit -m "docs: document the macOS shelf workflow"
 ```
 
-- [ ] **Step 6: Record final evidence**
+- [x] **Step 6: Record final evidence**
 
-Capture test count, build result, bundle verification result, remaining entitlement limitation, and final `git status --short` in the implementation handoff.
+Capture test count, build result, bundle verification result, remaining
+entitlement limitation, and final `git status --short` in the implementation
+handoff.
