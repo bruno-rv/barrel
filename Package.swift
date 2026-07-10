@@ -8,14 +8,23 @@ let package = Package(
     .macOS(.v14)
   ],
   products: [
+    .library(name: "BarrelCore", targets: ["BarrelCore"]),
     .executable(name: "BarrelMac", targets: ["BarrelMac"])
   ],
   targets: [
+    .target(
+      name: "BarrelCore",
+      swiftSettings: [.swiftLanguageMode(.v5)]
+    ),
     .executableTarget(
       name: "BarrelMac",
-      swiftSettings: [
-        .swiftLanguageMode(.v5)
-      ]
+      dependencies: ["BarrelCore"],
+      swiftSettings: [.swiftLanguageMode(.v5)]
+    ),
+    .testTarget(
+      name: "BarrelCoreTests",
+      dependencies: ["BarrelCore"],
+      swiftSettings: [.swiftLanguageMode(.v5)]
     )
   ]
 )
