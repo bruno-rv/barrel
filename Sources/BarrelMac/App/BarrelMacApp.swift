@@ -1,5 +1,6 @@
 import AppKit
 import BarrelCore
+import CoreSpotlight
 import SwiftUI
 
 @main
@@ -82,12 +83,43 @@ struct BarrelMacApp: App {
   }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
   private weak var store: ShelfStore?
+  private let hotKeyController = GlobalHotKeyController()
+  private var observers: [NSObjectProtocol] = []
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.regular)
     NSApp.activate(ignoringOtherApps: true)
+    hotKeyController.start()
+    observers = [
+      NotificationCenter.default.addObserver(
+        forName: .showBarrelShelf,
+        object: nil,
+        queue: .main
+      ) { [weak self] _ in
+        Task { @MainActor in self?.showShelf() }
+      },
+      NotificationCenter.default.addObserver(
+        forName: .repositoryDidChange,
+        object: nil,
+        queue: .main
+      ) { [weak self] _ in
+        Task { @MainActor in self?.store?.repositoryDidChange() }
+      },
+      NotificationCenter.default.addObserver(
+        forName: .selectShelfItem,
+        object: nil,
+        queue: .main
+      ) { [weak self] notification in
+        guard let itemID = notification.object as? UUID else { return }
+        Task { @MainActor in
+          self?.store?.repositoryDidChange(selecting: itemID)
+          self?.showShelf()
+        }
+      }
+    ]
   }
 
   func configureOpenFileHandler(store: ShelfStore) {
@@ -96,5 +128,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   func application(_ application: NSApplication, open urls: [URL]) {
     store?.importURLs(urls)
+  }
+
+  func applicationWillTerminate(_ notification: Notification) {
+    hotKeyController.stop()
+    for observer in observers {
+      NotificationCenter.default.removeObserver(observer)
+    }
+    observers = []
+  }
+
+  func application(
+    _ application: NSApplication,
+    continue userActivity: NSUserActivity,
+    restorationHandler: @escaping ([NSUserActivityRestoring]) -> Void
+  ) -> Bool {
+    guard let identifier = userActivity.userInfo?[CSSearchableItemActivityIdentifier] as? String,
+          let itemID = UUID(uuidString: identifier) else {
+      return false
+    }
+    NotificationCenter.default.post(name: .selectShelfItem, object: itemID)
+    return true
+  }
+
+  private func showShelf() {
+    NSApp.activate(ignoringOtherApps: true)
+    let shelfWindow = NSApp.windows.first { $0.title == "Barrel" } ?? NSApp.windows.first
+    shelfWindow?.makeKeyAndOrderFront(nil)
   }
 }

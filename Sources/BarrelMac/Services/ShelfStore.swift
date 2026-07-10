@@ -18,6 +18,7 @@ final class ShelfStore: ObservableObject {
 
   private let repository: ShelfRepository
   private let importer: ImportService
+  private let spotlightIndexer = SpotlightIndexer()
   private var fileURLsByItemID: [UUID: URL] = [:]
   private var clipboardTask: Task<Void, Never>?
   private var lastPasteboardChangeCount = NSPasteboard.general.changeCount
@@ -282,6 +283,16 @@ final class ShelfStore: ObservableObject {
     return NSItemProvider(object: item.title as NSString)
   }
 
+  func repositoryDidChange(selecting itemID: UUID? = nil) {
+    if itemID != nil {
+      filter = .all
+      searchText = ""
+    }
+    Task {
+      await refresh(preferredSelection: itemID)
+    }
+  }
+
   private func load() async {
     do {
       _ = try await repository.load()
@@ -312,6 +323,9 @@ final class ShelfStore: ObservableObject {
     fileURLsByItemID = resolvedURLs
     storageUsage = usage
     recomputeVisibleItems(preferredSelection: preferredSelection)
+    Task {
+      await spotlightIndexer.update(items: snapshot)
+    }
 
     guard performsAutomaticCleanup else { return true }
     let cleanupResult: Result<CleanupOutcome, Error>

@@ -7,6 +7,8 @@ struct SettingsView: View {
   @AppStorage("StorageQuotaBytes") private var storageQuotaBytes = 1_073_741_824
   @AppStorage("AutoHideShelf") private var autoHideShelf = true
   @AppStorage("ShelfEdge") private var shelfEdge = "left"
+  @AppStorage("GlobalHotKeyEnabled") private var globalHotKeyEnabled = true
+  @AppStorage("GlobalHotKeyChoice") private var globalHotKeyChoice = GlobalHotKeyChoice.controlOptionSpace.rawValue
 
   var body: some View {
     Form {
@@ -32,6 +34,16 @@ struct SettingsView: View {
         Text("Clipboard capture is off by default. When enabled, Barrel copies supported clipboard content into its private Application Support folder and expires it after the selected lifetime unless pinned.")
           .font(.footnote)
           .foregroundStyle(.secondary)
+      }
+
+      Section("Global Shortcut") {
+        Toggle("Enable global shelf shortcut", isOn: $globalHotKeyEnabled)
+        Picker("Shortcut", selection: $globalHotKeyChoice) {
+          ForEach(GlobalHotKeyChoice.allCases) { choice in
+            Text(choice.label).tag(choice.rawValue)
+          }
+        }
+        .disabled(!globalHotKeyEnabled)
       }
 
       Section("Storage") {
