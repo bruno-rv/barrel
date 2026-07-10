@@ -329,9 +329,8 @@ private struct ShelfTile: View {
 
   @ViewBuilder
   private var thumbnail: some View {
-    if item.kind == .image, let fileURL, let image = NSImage(contentsOf: fileURL) {
-      Image(nsImage: image)
-        .resizable()
+    if item.kind == .image, let fileURL {
+      CachedThumbnailView(url: fileURL, itemID: item.id, maxPixelSize: 76)
         .scaledToFill()
         .frame(width: 38, height: 38)
         .clipShape(RoundedRectangle(cornerRadius: 7))

@@ -32,7 +32,8 @@ struct WindowConfigurator: NSViewRepresentable {
 
   final class Coordinator {
     private weak var window: NSWindow?
-    private var timer: Timer?
+    private var localMouseMonitor: Any?
+    private var globalMouseMonitor: Any?
     private var edge: String
     private var autoHide: Bool
     private var isShown = true
@@ -78,8 +79,14 @@ struct WindowConfigurator: NSViewRepresentable {
     }
 
     func stop() {
-      timer?.invalidate()
-      timer = nil
+      if let localMouseMonitor {
+        NSEvent.removeMonitor(localMouseMonitor)
+        self.localMouseMonitor = nil
+      }
+      if let globalMouseMonitor {
+        NSEvent.removeMonitor(globalMouseMonitor)
+        self.globalMouseMonitor = nil
+      }
     }
 
     private func configureWindow(_ window: NSWindow) {
@@ -97,13 +104,18 @@ struct WindowConfigurator: NSViewRepresentable {
     }
 
     private func start() {
-      guard timer == nil else {
+      guard localMouseMonitor == nil, globalMouseMonitor == nil else {
         return
       }
-      timer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
+      localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
         self?.tick()
+        return event
       }
-      RunLoop.main.add(timer!, forMode: .common)
+      globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { [weak self] _ in
+        DispatchQueue.main.async {
+          self?.tick()
+        }
+      }
     }
 
     private func tick() {

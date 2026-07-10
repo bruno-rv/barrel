@@ -76,10 +76,9 @@ struct DetailView: View {
           .textSelection(.enabled)
           .foregroundStyle(.secondary)
       }
-    } else if item.kind == .image, let url = store.fileURL(for: item), let image = NSImage(contentsOf: url) {
+    } else if item.kind == .image, let url = store.fileURL(for: item) {
       SectionBox(title: "Preview") {
-        Image(nsImage: image)
-          .resizable()
+        CachedThumbnailView(url: url, itemID: item.id, maxPixelSize: 680)
           .scaledToFit()
           .frame(maxHeight: 340)
           .clipShape(RoundedRectangle(cornerRadius: 8))
