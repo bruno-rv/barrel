@@ -278,6 +278,60 @@ public actor ShelfRepository {
     return total
   }
 
+  public func syncRecords() -> [SyncRecord] {
+    items.map { item in
+      SyncRecord(item: item, assetURL: fileURL(for: item))
+    }
+  }
+
+  public func applySyncRecords(_ records: [SyncRecord]) throws {
+    try prepareStorage()
+    var updated: [ShelfItem] = []
+    var installedDirectories: [URL] = []
+    do {
+      for record in records {
+        var item = record.item
+        let existingURL = item.relativePath.flatMap(managedURL(for:))
+        if existingURL.map({ fileManager.fileExists(atPath: $0.path) }) != true {
+          if let assetURL = record.assetURL {
+            let fileName = (item.fileName ?? assetURL.lastPathComponent).isEmpty
+              ? "Synced File"
+              : (item.fileName ?? assetURL.lastPathComponent)
+            let safeFileName = URL(fileURLWithPath: fileName).lastPathComponent
+            let managedDirectory = itemsDirectory
+              .appendingPathComponent(item.id.uuidString, isDirectory: true)
+            let destination = managedDirectory.appendingPathComponent(safeFileName)
+            let stagedDirectory = stagingDirectory
+              .appendingPathComponent("Sync-\(UUID().uuidString)", isDirectory: true)
+            let stagedFile = stagedDirectory.appendingPathComponent(safeFileName)
+            try fileManager.createDirectory(at: stagedDirectory, withIntermediateDirectories: true)
+            do {
+              try fileManager.copyItem(at: assetURL, to: stagedFile)
+              try fileManager.createDirectory(at: managedDirectory, withIntermediateDirectories: true)
+              try fileManager.moveItem(at: stagedFile, to: destination)
+              installedDirectories.append(managedDirectory)
+              item.fileName = safeFileName
+              item.relativePath = makeRelativePath(for: destination)
+            } catch {
+              try? fileManager.removeItem(at: managedDirectory)
+              throw error
+            }
+            try? fileManager.removeItem(at: stagedDirectory)
+          } else {
+            item.relativePath = nil
+          }
+        }
+        updated.append(item)
+      }
+      try commitItems(updated)
+    } catch {
+      for directory in installedDirectories {
+        try? fileManager.removeItem(at: directory)
+      }
+      throw error
+    }
+  }
+
   private func update(id: UUID, mutation: (inout ShelfItem) -> Void) throws {
     guard let index = items.firstIndex(where: { $0.id == id }) else {
       throw RepositoryError.itemNotFound(id)

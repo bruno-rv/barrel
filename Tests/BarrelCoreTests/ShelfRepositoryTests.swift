@@ -346,6 +346,33 @@ final class ShelfRepositoryTests: XCTestCase {
     XCTAssertNil(stack.expiresAt)
   }
 
+  func testApplySyncRecordsCopiesRemoteAssetIntoManagedStorage() async throws {
+    let root = try makeRoot()
+    let remoteAsset = try makeSource(named: "remote.txt", contents: "remote bytes")
+    let remoteItem = ShelfItem(
+      id: UUID(),
+      title: "Remote",
+      kind: .file,
+      createdAt: now,
+      updatedAt: now,
+      fileName: "remote.txt",
+      relativePath: "Items/another-mac/remote.txt",
+      origin: .sync,
+      revision: 2,
+      modifiedByDeviceID: "remote-mac"
+    )
+    let repository = ShelfRepository(configuration: configuration(root: root))
+
+    try await repository.applySyncRecords([SyncRecord(item: remoteItem, assetURL: remoteAsset)])
+
+    let records = await repository.syncRecords()
+    let record = try XCTUnwrap(records.first)
+    let managedURL = try XCTUnwrap(record.assetURL)
+    XCTAssertEqual(record.item.id, remoteItem.id)
+    XCTAssertEqual(try Data(contentsOf: managedURL), Data("remote bytes".utf8))
+    XCTAssertTrue(managedURL.path.hasPrefix(root.appendingPathComponent("Items").path + "/"))
+  }
+
   private func configuration(
     root: URL,
     quotaBytes: Int64 = 1_073_741_824,
