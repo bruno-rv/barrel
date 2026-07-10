@@ -1,4 +1,5 @@
 import Carbon.HIToolbox
+import Combine
 import Foundation
 
 extension Notification.Name {
@@ -39,7 +40,11 @@ enum GlobalHotKeyChoice: String, CaseIterable, Identifiable {
 }
 
 @MainActor
-final class GlobalHotKeyController {
+final class GlobalHotKeyController: ObservableObject {
+  static let shared = GlobalHotKeyController()
+
+  @Published private(set) var registrationError: String?
+
   private let defaults: UserDefaults
   private var eventHandler: EventHandlerRef?
   private var hotKey: EventHotKeyRef?
@@ -55,7 +60,7 @@ final class GlobalHotKeyController {
       eventClass: OSType(kEventClassKeyboard),
       eventKind: UInt32(kEventHotKeyPressed)
     )
-    InstallEventHandler(
+    let status = InstallEventHandler(
       GetApplicationEventTarget(),
       { _, _, userData in
         guard let userData else { return noErr }
@@ -70,6 +75,11 @@ final class GlobalHotKeyController {
       Unmanaged.passUnretained(self).toOpaque(),
       &eventHandler
     )
+    guard status == noErr else {
+      eventHandler = nil
+      registrationError = "Could not install the shortcut handler (OSStatus \(status))."
+      return
+    }
     defaultsObserver = NotificationCenter.default.addObserver(
       forName: UserDefaults.didChangeNotification,
       object: defaults,
@@ -96,18 +106,26 @@ final class GlobalHotKeyController {
 
   private func registerConfiguredHotKey() {
     unregisterHotKey()
+    registrationError = nil
     guard defaults.bool(forKey: "GlobalHotKeyEnabled") else { return }
     let storedChoice = defaults.string(forKey: "GlobalHotKeyChoice") ?? ""
     let choice = GlobalHotKeyChoice(rawValue: storedChoice) ?? .controlOptionSpace
     let identifier = EventHotKeyID(signature: 0x4252_524C, id: 1)
-    RegisterEventHotKey(
+    var registeredHotKey: EventHotKeyRef?
+    let status = RegisterEventHotKey(
       choice.keyCode,
       choice.modifiers,
       identifier,
       GetApplicationEventTarget(),
       0,
-      &hotKey
+      &registeredHotKey
     )
+    guard status == noErr, let registeredHotKey else {
+      registrationError = "That global shortcut could not be registered (OSStatus \(status))."
+      hotKey = nil
+      return
+    }
+    hotKey = registeredHotKey
   }
 
   private func unregisterHotKey() {

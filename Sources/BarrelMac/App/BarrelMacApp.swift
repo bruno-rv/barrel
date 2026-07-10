@@ -8,6 +8,7 @@ struct BarrelMacApp: App {
   @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
   @StateObject private var store = ShelfStore()
   @StateObject private var syncController = SyncController()
+  @StateObject private var hotKeyController = GlobalHotKeyController.shared
 
   var body: some Scene {
     WindowGroup("Barrel", id: "main") {
@@ -75,11 +76,15 @@ struct BarrelMacApp: App {
 
       Divider()
 
-      Text("\(store.items.count) held items")
+      Text("\(store.liveItemCount) held items")
     }
 
     Settings {
-      SettingsView(store: store, syncController: syncController)
+      SettingsView(
+        store: store,
+        syncController: syncController,
+        hotKeyController: hotKeyController
+      )
     }
   }
 }
@@ -87,8 +92,9 @@ struct BarrelMacApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
   private weak var store: ShelfStore?
-  private let hotKeyController = GlobalHotKeyController()
+  private let hotKeyController = GlobalHotKeyController.shared
   private var observers: [NSObjectProtocol] = []
+  private var pendingSelectionID: UUID?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.regular)
@@ -116,8 +122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       ) { [weak self] notification in
         guard let itemID = notification.object as? UUID else { return }
         Task { @MainActor in
-          self?.store?.repositoryDidChange(selecting: itemID)
-          self?.showShelf()
+          self?.handleSelection(itemID)
         }
       }
     ]
@@ -125,6 +130,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   func configureOpenFileHandler(store: ShelfStore) {
     self.store = store
+    if let pendingSelectionID {
+      self.pendingSelectionID = nil
+      store.repositoryDidChange(selecting: pendingSelectionID)
+    }
   }
 
   func application(_ application: NSApplication, open urls: [URL]) {
@@ -156,5 +165,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     NSApp.activate(ignoringOtherApps: true)
     let shelfWindow = NSApp.windows.first { $0.title == "Barrel" } ?? NSApp.windows.first
     shelfWindow?.makeKeyAndOrderFront(nil)
+  }
+
+  private func handleSelection(_ itemID: UUID) {
+    if let store {
+      store.repositoryDidChange(selecting: itemID)
+    } else {
+      pendingSelectionID = itemID
+    }
+    showShelf()
   }
 }

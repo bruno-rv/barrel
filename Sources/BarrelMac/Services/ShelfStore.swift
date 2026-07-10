@@ -21,6 +21,7 @@ final class ShelfStore: ObservableObject {
   private let spotlightIndexer = SpotlightIndexer()
   private var fileURLsByItemID: [UUID: URL] = [:]
   private var clipboardTask: Task<Void, Never>?
+  private var spotlightTask: Task<Void, Never>?
   private var lastPasteboardChangeCount = NSPasteboard.general.changeCount
   private var refreshGeneration = 0
 
@@ -41,7 +42,7 @@ final class ShelfStore: ObservableObject {
   }
 
   var liveItemCount: Int {
-    items.lazy.filter { $0.trashedAt == nil }.count
+    items.lazy.filter { $0.trashedAt == nil && $0.deletedAt == nil }.count
   }
 
   func item(with id: ShelfItem.ID) -> ShelfItem? {
@@ -69,6 +70,7 @@ final class ShelfStore: ObservableObject {
       let outcome = await repository.importFiles(urls, origin: .imported, expiresAt: nil)
       isImporting = false
       report(errors: outcome.failures.map(\.message))
+      if !outcome.successes.isEmpty { notifyRepositoryChange() }
       await refresh(preferredSelection: outcome.successes.first?.id)
     }
   }
@@ -84,6 +86,7 @@ final class ShelfStore: ObservableObject {
       )
       isImporting = false
       report(errors: result.errors)
+      if !result.items.isEmpty { notifyRepositoryChange() }
       await refresh(preferredSelection: result.items.first?.id)
     }
   }
@@ -102,6 +105,7 @@ final class ShelfStore: ObservableObject {
         errorMessage = "The clipboard does not contain a file, image, link, or text item."
       } else {
         report(errors: result.errors)
+        if !result.items.isEmpty { notifyRepositoryChange() }
         await refresh(preferredSelection: result.items.first?.id)
       }
     }
@@ -126,7 +130,9 @@ final class ShelfStore: ObservableObject {
   }
 
   func toggleSelection(for item: ShelfItem) {
-    guard item.trashedAt == nil, visibleItems.contains(where: { $0.id == item.id }) else {
+    guard item.trashedAt == nil,
+          item.deletedAt == nil,
+          visibleItems.contains(where: { $0.id == item.id }) else {
       return
     }
     if selectedIDs.contains(item.id) {
@@ -147,6 +153,7 @@ final class ShelfStore: ObservableObject {
     Task {
       do {
         let stack = try await repository.stack(ids: ids)
+        notifyRepositoryChange()
         selectedIDs = []
         await refresh(preferredSelection: stack.id)
       } catch {
@@ -159,6 +166,7 @@ final class ShelfStore: ObservableObject {
     Task {
       do {
         try await repository.split(id: stack.id)
+        notifyRepositoryChange()
         await refresh(preferredSelection: stack.children.first?.id)
       } catch {
         errorMessage = error.localizedDescription
@@ -170,6 +178,7 @@ final class ShelfStore: ObservableObject {
     Task {
       do {
         try await repository.rename(id: item.id, title: title)
+        notifyRepositoryChange()
         await refresh(preferredSelection: item.id)
       } catch {
         errorMessage = error.localizedDescription
@@ -181,6 +190,7 @@ final class ShelfStore: ObservableObject {
     Task {
       do {
         try await repository.setPinned(id: item.id, isPinned: isPinned)
+        notifyRepositoryChange()
         await refresh(preferredSelection: item.id)
       } catch {
         errorMessage = error.localizedDescription
@@ -192,6 +202,7 @@ final class ShelfStore: ObservableObject {
     Task {
       do {
         try await repository.setExpiration(id: item.id, date: preset.expirationDate(from: .now))
+        notifyRepositoryChange()
         await refresh(preferredSelection: item.id)
       } catch {
         errorMessage = error.localizedDescription
@@ -211,6 +222,7 @@ final class ShelfStore: ObservableObject {
     Task {
       do {
         try await repository.restore(ids: [item.id])
+        notifyRepositoryChange()
         await refresh(preferredSelection: item.id)
       } catch {
         errorMessage = error.localizedDescription
@@ -225,6 +237,7 @@ final class ShelfStore: ObservableObject {
       } catch {
         errorMessage = error.localizedDescription
       }
+      notifyRepositoryChange()
       await refresh()
     }
   }
@@ -236,6 +249,7 @@ final class ShelfStore: ObservableObject {
       } catch {
         errorMessage = error.localizedDescription
       }
+      notifyRepositoryChange()
       await refresh()
     }
   }
@@ -248,6 +262,7 @@ final class ShelfStore: ObservableObject {
       } catch {
         errorMessage = error.localizedDescription
       }
+      notifyRepositoryChange()
       await refresh(performsAutomaticCleanup: false)
     }
   }
@@ -323,8 +338,12 @@ final class ShelfStore: ObservableObject {
     fileURLsByItemID = resolvedURLs
     storageUsage = usage
     recomputeVisibleItems(preferredSelection: preferredSelection)
-    Task {
-      await spotlightIndexer.update(items: snapshot)
+    spotlightTask?.cancel()
+    spotlightTask = Task { [weak self] in
+      guard let self else { return }
+      let indexingError = await spotlightIndexer.update(items: snapshot)
+      guard !Task.isCancelled, let indexingError, errorMessage == nil else { return }
+      errorMessage = "Spotlight could not update the Barrel index: \(indexingError)"
     }
 
     guard performsAutomaticCleanup else { return true }
@@ -353,7 +372,9 @@ final class ShelfStore: ObservableObject {
   private func recomputeVisibleItems(preferredSelection: UUID? = nil) {
     visibleItems = filter.filter(items, query: searchText)
     let visibleIDs = Set(visibleItems.map(\.id))
-    let liveVisibleIDs = Set(visibleItems.lazy.filter { $0.trashedAt == nil }.map(\.id))
+    let liveVisibleIDs = Set(
+      visibleItems.lazy.filter { $0.trashedAt == nil && $0.deletedAt == nil }.map(\.id)
+    )
     selectedIDs.formIntersection(liveVisibleIDs)
     if let preferredSelection, visibleIDs.contains(preferredSelection) {
       selectedItemID = preferredSelection
@@ -377,6 +398,7 @@ final class ShelfStore: ObservableObject {
     )
     report(errors: result.errors)
     if !result.items.isEmpty {
+      notifyRepositoryChange()
       await refresh(preferredSelection: result.items.first?.id)
     }
   }
@@ -386,6 +408,7 @@ final class ShelfStore: ObservableObject {
     Task {
       do {
         try await repository.trash(ids: ids)
+        notifyRepositoryChange()
         selectedIDs.subtract(ids)
         await refresh()
       } catch {
@@ -398,6 +421,10 @@ final class ShelfStore: ObservableObject {
     if !errors.isEmpty {
       errorMessage = errors.joined(separator: "\n")
     }
+  }
+
+  private func notifyRepositoryChange() {
+    NotificationCenter.default.post(name: .repositoryDidChange, object: self)
   }
 
   private func report(cleanup outcome: CleanupOutcome) {

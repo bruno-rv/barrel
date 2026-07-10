@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
   @ObservedObject var store: ShelfStore
   @ObservedObject var syncController: SyncController
+  @ObservedObject var hotKeyController: GlobalHotKeyController
   @AppStorage("CaptureClipboardHistory") private var captureClipboardHistory = false
   @AppStorage("ClipboardLifetimeHours") private var clipboardLifetimeHours = 24
   @AppStorage("StorageQuotaBytes") private var storageQuotaBytes = 1_073_741_824
@@ -46,6 +47,11 @@ struct SettingsView: View {
           }
         }
         .disabled(!globalHotKeyEnabled)
+        if let registrationError = hotKeyController.registrationError {
+          Text(registrationError)
+            .font(.footnote)
+            .foregroundStyle(.red)
+        }
       }
 
       Section("Storage") {
@@ -89,7 +95,6 @@ struct SettingsView: View {
     .onAppear {
       store.setClipboardCapture(enabled: captureClipboardHistory)
       store.setStorageQuota(storageQuotaBytes)
-      syncController.setEnabled(cloudSyncEnabled)
     }
     .onChange(of: captureClipboardHistory) {
       store.setClipboardCapture(enabled: captureClipboardHistory)
@@ -108,5 +113,9 @@ struct SettingsView: View {
 }
 
 #Preview {
-  SettingsView(store: .preview, syncController: SyncController())
+  SettingsView(
+    store: .preview,
+    syncController: SyncController(),
+    hotKeyController: .shared
+  )
 }
