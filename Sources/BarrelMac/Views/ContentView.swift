@@ -284,12 +284,14 @@ private struct ShelfTile: View {
 
       Spacer(minLength: 8)
 
-      Button(action: toggleMark) {
-        Image(systemName: isMarked ? "checkmark.circle.fill" : "circle")
-          .foregroundStyle(isMarked ? .white : .white.opacity(0.42))
+      if item.trashedAt == nil {
+        Button(action: toggleMark) {
+          Image(systemName: isMarked ? "checkmark.circle.fill" : "circle")
+            .foregroundStyle(isMarked ? .white : .white.opacity(0.42))
+        }
+        .buttonStyle(.plain)
+        .help("Mark for stack")
       }
-      .buttonStyle(.plain)
-      .help("Mark for stack")
     }
     .padding(8)
     .background(tileBackground, in: RoundedRectangle(cornerRadius: 10))

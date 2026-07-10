@@ -21,6 +21,7 @@ final class ShelfStore: ObservableObject {
   private var fileURLsByItemID: [UUID: URL] = [:]
   private var clipboardTask: Task<Void, Never>?
   private var lastPasteboardChangeCount = NSPasteboard.general.changeCount
+  private var refreshGeneration = 0
 
   init(
     repository: ShelfRepository = BarrelEnvironment.shared.repository,
@@ -124,6 +125,9 @@ final class ShelfStore: ObservableObject {
   }
 
   func toggleSelection(for item: ShelfItem) {
+    guard item.trashedAt == nil, visibleItems.contains(where: { $0.id == item.id }) else {
+      return
+    }
     if selectedIDs.contains(item.id) {
       selectedIDs.remove(item.id)
     } else {
@@ -217,10 +221,10 @@ final class ShelfStore: ObservableObject {
     Task {
       do {
         try await repository.emptyTrash()
-        await refresh()
       } catch {
         errorMessage = error.localizedDescription
       }
+      await refresh()
     }
   }
 
@@ -228,27 +232,29 @@ final class ShelfStore: ObservableObject {
     Task {
       do {
         try await repository.deletePermanently(ids: [item.id])
-        await refresh()
       } catch {
         errorMessage = error.localizedDescription
       }
+      await refresh()
     }
   }
 
   func cleanup() {
     Task {
       do {
-        try await repository.cleanup()
-        await refresh()
+        let outcome = try await repository.cleanup()
+        report(cleanup: outcome)
       } catch {
         errorMessage = error.localizedDescription
       }
+      await refresh(performsAutomaticCleanup: false)
     }
   }
 
   func setStorageQuota(_ bytes: Int) {
     Task {
       await repository.setStorageQuota(Int64(bytes))
+      await refresh()
     }
   }
 
@@ -285,27 +291,61 @@ final class ShelfStore: ObservableObject {
     }
   }
 
-  private func refresh(preferredSelection: UUID? = nil) async {
-    items = await repository.snapshot()
+  @discardableResult
+  private func refresh(
+    preferredSelection: UUID? = nil,
+    performsAutomaticCleanup: Bool = true
+  ) async -> Bool {
+    refreshGeneration += 1
+    let generation = refreshGeneration
+    let snapshot = await repository.snapshot()
     var resolvedURLs: [UUID: URL] = [:]
-    for item in items {
+    for item in snapshot {
       if let url = await repository.fileURL(for: item) {
         resolvedURLs[item.id] = url
       }
     }
+    let usage = (try? await repository.storageUsage()) ?? 0
+    guard generation == refreshGeneration else { return false }
+
+    items = snapshot
     fileURLsByItemID = resolvedURLs
-    storageUsage = (try? await repository.storageUsage()) ?? 0
-    recomputeVisibleItems()
-    selectedIDs.formIntersection(Set(items.map(\.id)))
-    if let preferredSelection {
-      selectedItemID = preferredSelection
-    } else if selectedItemID.flatMap(item(with:)) == nil {
-      selectedItemID = visibleItems.first?.id
+    storageUsage = usage
+    recomputeVisibleItems(preferredSelection: preferredSelection)
+
+    guard performsAutomaticCleanup else { return true }
+    let cleanupResult: Result<CleanupOutcome, Error>
+    do {
+      cleanupResult = .success(try await repository.cleanup())
+    } catch {
+      cleanupResult = .failure(error)
     }
+    guard generation == refreshGeneration else { return true }
+
+    let applied = await refresh(
+      preferredSelection: preferredSelection,
+      performsAutomaticCleanup: false
+    )
+    guard applied else { return true }
+    switch cleanupResult {
+    case .success(let outcome):
+      report(cleanup: outcome)
+    case .failure(let error):
+      errorMessage = error.localizedDescription
+    }
+    return true
   }
 
-  private func recomputeVisibleItems() {
+  private func recomputeVisibleItems(preferredSelection: UUID? = nil) {
     visibleItems = filter.filter(items, query: searchText)
+    let visibleIDs = Set(visibleItems.map(\.id))
+    let liveVisibleIDs = Set(visibleItems.lazy.filter { $0.trashedAt == nil }.map(\.id))
+    selectedIDs.formIntersection(liveVisibleIDs)
+    if let preferredSelection, visibleIDs.contains(preferredSelection) {
+      selectedItemID = preferredSelection
+    } else if selectedItemID.map(visibleIDs.contains) != true {
+      selectedItemID = visibleItems.first?.id
+    }
   }
 
   private func captureClipboardIfChanged() async {
@@ -344,6 +384,13 @@ final class ShelfStore: ObservableObject {
     if !errors.isEmpty {
       errorMessage = errors.joined(separator: "\n")
     }
+  }
+
+  private func report(cleanup outcome: CleanupOutcome) {
+    guard outcome.requiresManualCleanup, errorMessage == nil else { return }
+    let usage = ByteCountFormatter.string(fromByteCount: outcome.physicalUsageBytes, countStyle: .file)
+    let quota = ByteCountFormatter.string(fromByteCount: outcome.quotaBytes, countStyle: .file)
+    errorMessage = "Barrel is still using \(usage), above the \(quota) storage quota. Empty Trash or delete items manually to free space."
   }
 }
 

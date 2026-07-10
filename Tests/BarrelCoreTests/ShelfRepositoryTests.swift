@@ -27,7 +27,10 @@ final class ShelfRepositoryTests: XCTestCase {
     try Data("hello".utf8).write(to: source)
     addTeardownBlock { try? FileManager.default.removeItem(at: source) }
     let repository = ShelfRepository(
-      configuration: configuration(root: root) { _, _ in throw TestError.writeFailed }
+      configuration: configuration(
+        root: root,
+        manifestWriter: { _, _ in throw TestError.writeFailed }
+      )
     )
 
     let outcome = await repository.importFiles([source], origin: .imported, expiresAt: nil)
@@ -113,6 +116,27 @@ final class ShelfRepositoryTests: XCTestCase {
     snapshot = await repository.snapshot()
     XCTAssertNil(snapshot.first?.trashedAt)
     XCTAssertTrue(fileManager.fileExists(atPath: fileURL.path))
+  }
+
+  func testTrashingAnAlreadyTrashedItemPreservesOriginalDeletionDate() async throws {
+    let root = try makeRoot()
+    let clock = TestClock(now)
+    let repository = ShelfRepository(configuration: configuration(root: root, now: { clock.date }))
+    let item = try await repository.addText(
+      "Keep original trash date",
+      kind: .text,
+      origin: .imported,
+      expiresAt: nil
+    )
+
+    try await repository.trash(ids: [item.id])
+    clock.date = now.addingTimeInterval(3_600)
+    try await repository.trash(ids: [item.id])
+
+    let snapshot = await repository.snapshot()
+    let trashed = try XCTUnwrap(snapshot.first)
+    XCTAssertEqual(trashed.trashedAt, now)
+    XCTAssertEqual(trashed.revision, item.revision + 1)
   }
 
   func testEmptyTrashKeepsFileReferencedByLiveDuplicate() async throws {
@@ -260,6 +284,22 @@ final class ShelfRepositoryTests: XCTestCase {
     XCTAssertNotNil(snapshot.first(where: { $0.id == item.id })?.trashedAt)
   }
 
+  func testCleanupReportsWhenPhysicalUsageRemainsAboveQuota() async throws {
+    let root = try makeRoot()
+    let source = try makeSource(named: "clipboard.txt", contents: "123456")
+    let repository = ShelfRepository(configuration: configuration(root: root, quotaBytes: 0))
+    let outcome = await repository.importFiles([source], origin: .clipboard, expiresAt: nil)
+    XCTAssertEqual(outcome.successes.count, 1)
+
+    let cleanup = try await repository.cleanup()
+
+    XCTAssertEqual(cleanup.physicalUsageBytes, 6)
+    XCTAssertEqual(cleanup.quotaBytes, 0)
+    XCTAssertTrue(cleanup.requiresManualCleanup)
+    let snapshot = await repository.snapshot()
+    XCTAssertNotNil(snapshot.first?.trashedAt)
+  }
+
   func testClipboardStackInheritsClipboardRetention() async throws {
     let root = try makeRoot()
     let repository = ShelfRepository(configuration: configuration(root: root))
@@ -309,15 +349,17 @@ final class ShelfRepositoryTests: XCTestCase {
   private func configuration(
     root: URL,
     quotaBytes: Int64 = 1_073_741_824,
+    now: (@Sendable () -> Date)? = nil,
     manifestWriter: @escaping ManifestWriter = RepositoryConfiguration.defaultManifestWriter
   ) -> RepositoryConfiguration {
-    let now = now
+    let defaultNow = self.now
+    let configuredNow = now ?? { defaultNow }
     return RepositoryConfiguration(
       rootURL: root,
       deviceID: "test-mac",
       quotaBytes: quotaBytes,
       trashRetention: 604_800,
-      now: { now },
+      now: configuredNow,
       manifestWriter: manifestWriter
     )
   }
@@ -352,5 +394,19 @@ final class ShelfRepositoryTests: XCTestCase {
 
   private enum TestError: Error {
     case writeFailed
+  }
+}
+
+private final class TestClock: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storedDate: Date
+
+  init(_ date: Date) {
+    storedDate = date
+  }
+
+  var date: Date {
+    get { lock.withLock { storedDate } }
+    set { lock.withLock { storedDate = newValue } }
   }
 }

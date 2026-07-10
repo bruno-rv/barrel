@@ -51,6 +51,20 @@ public struct ImportOutcome: Equatable, Sendable {
   }
 }
 
+public struct CleanupOutcome: Equatable, Sendable {
+  public let physicalUsageBytes: Int64
+  public let quotaBytes: Int64
+
+  public init(physicalUsageBytes: Int64, quotaBytes: Int64) {
+    self.physicalUsageBytes = max(physicalUsageBytes, 0)
+    self.quotaBytes = max(quotaBytes, 0)
+  }
+
+  public var requiresManualCleanup: Bool {
+    physicalUsageBytes > quotaBytes
+  }
+}
+
 public enum RepositoryError: Error, Equatable, Sendable {
   case corruptManifest
   case itemNotFound(UUID)

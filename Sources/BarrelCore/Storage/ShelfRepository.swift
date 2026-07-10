@@ -188,11 +188,14 @@ public actor ShelfRepository {
     let targetIDs = Set(ids)
     let now = configuration.now()
     var updated = items
-    for index in updated.indices where targetIDs.contains(updated[index].id) {
+    for index in updated.indices
+    where targetIDs.contains(updated[index].id) && updated[index].trashedAt == nil {
       updated[index].trashedAt = now
       touch(&updated[index], at: now)
     }
-    try commitItems(updated)
+    if updated != items {
+      try commitItems(updated)
+    }
   }
 
   public func restore(ids: [UUID]) throws {
@@ -225,7 +228,8 @@ public actor ShelfRepository {
     try deleteUnreferencedFiles(from: removed, remainingItems: remaining)
   }
 
-  public func cleanup() throws {
+  @discardableResult
+  public func cleanup() throws -> CleanupOutcome {
     let now = configuration.now()
     let trashCutoff = now.addingTimeInterval(-configuration.trashRetention)
     let permanentlyRemoved = items.filter { item in
@@ -247,9 +251,11 @@ public actor ShelfRepository {
       updated[index].trashedAt = now
       touch(&updated[index], at: now)
     }
-    guard updated != items else { return }
-    try commitItems(updated)
-    try deleteUnreferencedFiles(from: permanentlyRemoved, remainingItems: updated)
+    if updated != items {
+      try commitItems(updated)
+      try deleteUnreferencedFiles(from: permanentlyRemoved, remainingItems: updated)
+    }
+    return CleanupOutcome(physicalUsageBytes: try storageUsage(), quotaBytes: quotaBytes)
   }
 
   public func fileURL(for item: ShelfItem) -> URL? {
