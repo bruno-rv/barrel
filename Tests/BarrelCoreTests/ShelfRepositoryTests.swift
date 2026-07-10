@@ -213,15 +213,81 @@ final class ShelfRepositoryTests: XCTestCase {
     XCTAssertEqual(usage, 6)
   }
 
+  func testQuotaCleanupCountsDeduplicatedManagedFileOnce() async throws {
+    let root = try makeRoot()
+    let firstSource = try makeSource(named: "first.txt", contents: "123456")
+    let secondSource = try makeSource(named: "second.txt", contents: "123456")
+    let repository = ShelfRepository(configuration: configuration(root: root, quotaBytes: 6))
+    let outcome = await repository.importFiles(
+      [firstSource, secondSource],
+      origin: .clipboard,
+      expiresAt: nil
+    )
+    XCTAssertEqual(outcome.successes.count, 2)
+
+    try await repository.cleanup()
+
+    let snapshot = await repository.snapshot()
+    XCTAssertEqual(snapshot.count, 2)
+    XCTAssertTrue(snapshot.allSatisfy { $0.trashedAt == nil })
+  }
+
+  func testClipboardStackInheritsClipboardRetention() async throws {
+    let root = try makeRoot()
+    let repository = ShelfRepository(configuration: configuration(root: root))
+    let firstExpiration = now.addingTimeInterval(3_600)
+    let secondExpiration = now.addingTimeInterval(7_200)
+    let first = try await repository.addText(
+      "First",
+      kind: .text,
+      origin: .clipboard,
+      expiresAt: firstExpiration
+    )
+    let second = try await repository.addText(
+      "Second",
+      kind: .text,
+      origin: .clipboard,
+      expiresAt: secondExpiration
+    )
+
+    let stack = try await repository.stack(ids: [first.id, second.id])
+
+    XCTAssertEqual(stack.origin, .clipboard)
+    XCTAssertEqual(stack.expiresAt, firstExpiration)
+  }
+
+  func testMixedOriginStackDoesNotExpireAutomatically() async throws {
+    let root = try makeRoot()
+    let repository = ShelfRepository(configuration: configuration(root: root))
+    let imported = try await repository.addText(
+      "Imported",
+      kind: .text,
+      origin: .imported,
+      expiresAt: nil
+    )
+    let clipboard = try await repository.addText(
+      "Clipboard",
+      kind: .text,
+      origin: .clipboard,
+      expiresAt: now.addingTimeInterval(3_600)
+    )
+
+    let stack = try await repository.stack(ids: [imported.id, clipboard.id])
+
+    XCTAssertEqual(stack.origin, .imported)
+    XCTAssertNil(stack.expiresAt)
+  }
+
   private func configuration(
     root: URL,
+    quotaBytes: Int64 = 1_073_741_824,
     manifestWriter: @escaping ManifestWriter = RepositoryConfiguration.defaultManifestWriter
   ) -> RepositoryConfiguration {
     let now = now
     return RepositoryConfiguration(
       rootURL: root,
       deviceID: "test-mac",
-      quotaBytes: 1_073_741_824,
+      quotaBytes: quotaBytes,
       trashRetention: 604_800,
       now: { now },
       manifestWriter: manifestWriter

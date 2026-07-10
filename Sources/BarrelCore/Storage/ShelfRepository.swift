@@ -138,12 +138,15 @@ public actor ShelfRepository {
     }
     let firstIndex = items.firstIndex { selectedIDs.contains($0.id) } ?? 0
     let now = configuration.now()
+    let inheritsClipboardRetention = selected.allSatisfy { $0.origin == .clipboard }
     let stack = ShelfItem(
       title: stackTitle(for: selected),
       kind: .stack,
       createdAt: now,
       updatedAt: now,
       children: selected,
+      origin: inheritsClipboardRetention ? .clipboard : .imported,
+      expiresAt: inheritsClipboardRetention ? selected.compactMap(\.expiresAt).min() : nil,
       revision: 1,
       modifiedByDeviceID: configuration.deviceID
     )
@@ -214,7 +217,7 @@ public actor ShelfRepository {
     var updated = items.filter { item in
       item.trashedAt.map { $0 <= trashCutoff } != true
     }
-    let sizes = Dictionary(uniqueKeysWithValues: updated.map { ($0.id, size(of: $0)) })
+    let sizes = physicalBytesByItemID(updated, now: now)
     let candidates = Set(
       RetentionPolicy().cleanupCandidates(
         items: updated,
@@ -466,16 +469,46 @@ public actor ShelfRepository {
     }
   }
 
-  private func size(of item: ShelfItem) -> Int64 {
-    let paths = Set(flattened([item]).compactMap(\.relativePath))
-    return paths.reduce(Int64(0)) { total, path in
-      guard let url = managedURL(for: path),
+  private func physicalBytesByItemID(_ source: [ShelfItem], now: Date) -> [UUID: Int64] {
+    let liveItems = source.filter { $0.trashedAt == nil }
+    let expired = liveItems.filter { $0.isExpired(at: now) }.sorted(by: cleanupOrder)
+    let expiredIDs = Set(expired.map(\.id))
+    let clipboard = liveItems
+      .filter { $0.origin == .clipboard && !$0.isPinned && !expiredIDs.contains($0.id) }
+      .sorted(by: cleanupOrder)
+    let removalRank = Dictionary(
+      uniqueKeysWithValues: (expired + clipboard).enumerated().map { ($0.element.id, $0.offset) }
+    )
+    var referencesByPath: [String: [ShelfItem]] = [:]
+    for item in liveItems {
+      for path in Set(flattened([item]).compactMap(\.relativePath)) {
+        referencesByPath[path, default: []].append(item)
+      }
+    }
+
+    var bytesByItemID = Dictionary(uniqueKeysWithValues: liveItems.map { ($0.id, Int64(0)) })
+    for (path, references) in referencesByPath {
+      let owner = references.max { lhs, rhs in
+        let lhsRank = removalRank[lhs.id] ?? Int.max
+        let rhsRank = removalRank[rhs.id] ?? Int.max
+        return lhsRank == rhsRank ? lhs.id.uuidString < rhs.id.uuidString : lhsRank < rhsRank
+      }
+      guard let owner,
+            let url = managedURL(for: path),
             let attributes = try? fileManager.attributesOfItem(atPath: url.path),
             let number = attributes[.size] as? NSNumber else {
-        return total
+        continue
       }
-      return total + number.int64Value
+      bytesByItemID[owner.id, default: 0] += number.int64Value
     }
+    return bytesByItemID
+  }
+
+  private func cleanupOrder(_ lhs: ShelfItem, _ rhs: ShelfItem) -> Bool {
+    if lhs.createdAt != rhs.createdAt {
+      return lhs.createdAt < rhs.createdAt
+    }
+    return lhs.id.uuidString < rhs.id.uuidString
   }
 
   private func flattened(_ source: [ShelfItem]) -> [ShelfItem] {
