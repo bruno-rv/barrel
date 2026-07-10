@@ -16,4 +16,14 @@ final class ShelfItemTests: XCTestCase {
     XCTAssertEqual(item.revision, 0)
     XCTAssertEqual(item.modifiedByDeviceID, "")
   }
+
+  func testFiltersExcludeTrashUnlessTrashIsSelected() {
+    let liveFile = ShelfItem(title: "Live", kind: .file)
+    let trashedFile = ShelfItem(title: "Trash", kind: .file, trashedAt: .now)
+
+    XCTAssertTrue(ShelfFilter.files.accepts(liveFile))
+    XCTAssertFalse(ShelfFilter.files.accepts(trashedFile))
+    XCTAssertFalse(ShelfFilter.trash.accepts(liveFile))
+    XCTAssertTrue(ShelfFilter.trash.accepts(trashedFile))
+  }
 }
