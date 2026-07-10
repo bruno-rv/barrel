@@ -1,153 +1,139 @@
 import AppKit
+import BarrelCore
 import Foundation
 import UniformTypeIdentifiers
 
+struct ProviderImportResult {
+  var items: [ShelfItem] = []
+  var errors: [String] = []
+}
+
+@MainActor
 final class ImportService {
-  private let fileManager: FileManager
-  private let supportDirectory: URL
-  private let itemsDirectory: URL
-  let manifestURL: URL
-
-  init(fileManager: FileManager = .default) {
-    self.fileManager = fileManager
-    let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-    supportDirectory = base.appendingPathComponent("BarrelMac", isDirectory: true)
-    itemsDirectory = supportDirectory.appendingPathComponent("Items", isDirectory: true)
-    manifestURL = supportDirectory.appendingPathComponent("shelf.json")
-  }
-
-  func prepareStorage() throws {
-    try fileManager.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
-    try fileManager.createDirectory(at: itemsDirectory, withIntermediateDirectories: true)
-  }
-
-  func loadManifest() throws -> [ShelfItem] {
-    try prepareStorage()
-    guard fileManager.fileExists(atPath: manifestURL.path) else {
-      return []
+  func importItems(
+    from providers: [NSItemProvider],
+    into repository: ShelfRepository,
+    origin: ShelfOrigin,
+    expiresAt: Date?
+  ) async -> ProviderImportResult {
+    var result = ProviderImportResult()
+    for provider in providers {
+      do {
+        if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier),
+           let url = try await provider.loadURL(typeIdentifier: UTType.fileURL.identifier) {
+          append(
+            await repository.importFiles([url], origin: origin, expiresAt: expiresAt),
+            to: &result
+          )
+        } else if provider.canLoadObject(ofClass: NSImage.self) {
+          let image = try await provider.loadObject(NSImage.self)
+          append(
+            try await importImage(image, into: repository, origin: origin, expiresAt: expiresAt),
+            to: &result
+          )
+        } else if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier),
+                  let url = try await provider.loadURL(typeIdentifier: UTType.url.identifier) {
+          result.items.append(
+            try await repository.addText(
+              url.absoluteString,
+              kind: .link,
+              origin: origin,
+              expiresAt: expiresAt
+            )
+          )
+        } else if provider.hasItemConformingToTypeIdentifier(UTType.text.identifier),
+                  let text = try await provider.loadString(typeIdentifier: UTType.text.identifier) {
+          let kind: ShelfKind = URL(string: text)?.scheme == nil ? .text : .link
+          result.items.append(
+            try await repository.addText(text, kind: kind, origin: origin, expiresAt: expiresAt)
+          )
+        }
+      } catch {
+        result.errors.append(error.localizedDescription)
+      }
     }
-    let data = try Data(contentsOf: manifestURL)
-    let decoder = JSONDecoder()
-    decoder.dateDecodingStrategy = .iso8601
-    return try decoder.decode([ShelfItem].self, from: data)
+    return result
   }
 
-  func saveManifest(_ items: [ShelfItem]) throws {
-    try prepareStorage()
-    let encoder = JSONEncoder()
-    encoder.dateEncodingStrategy = .iso8601
-    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-    let data = try encoder.encode(items)
-    try data.write(to: manifestURL, options: [.atomic])
-  }
-
-  func resolvedURL(for item: ShelfItem) -> URL? {
-    guard let relativePath = item.relativePath else {
-      return nil
+  func importPasteboard(
+    _ pasteboard: NSPasteboard,
+    into repository: ShelfRepository,
+    origin: ShelfOrigin,
+    expiresAt: Date?
+  ) async -> ProviderImportResult {
+    if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL], !urls.isEmpty {
+      var result = ProviderImportResult()
+      append(await repository.importFiles(urls, origin: origin, expiresAt: expiresAt), to: &result)
+      return result
     }
-    return supportDirectory.appendingPathComponent(relativePath)
-  }
-
-  func makeFileItem(from sourceURL: URL) throws -> ShelfItem {
-    try prepareStorage()
-    let id = UUID()
-    let originalName = sourceURL.lastPathComponent.isEmpty ? "Imported File" : sourceURL.lastPathComponent
-    let itemDirectory = itemsDirectory.appendingPathComponent(id.uuidString, isDirectory: true)
-    let destination = itemDirectory.appendingPathComponent(originalName)
-
-    try fileManager.createDirectory(at: itemDirectory, withIntermediateDirectories: true)
-    if fileManager.fileExists(atPath: destination.path) {
-      try fileManager.removeItem(at: destination)
+    if let image = NSImage(pasteboard: pasteboard) {
+      do {
+        var result = ProviderImportResult()
+        append(
+          try await importImage(image, into: repository, origin: origin, expiresAt: expiresAt),
+          to: &result
+        )
+        return result
+      } catch {
+        return ProviderImportResult(errors: [error.localizedDescription])
+      }
     }
-    try fileManager.copyItem(at: sourceURL, to: destination)
-
-    let type = UTType(filenameExtension: destination.pathExtension)
-    let kind: ShelfKind = type?.conforms(to: .image) == true ? .image : .file
-    let title = destination.deletingPathExtension().lastPathComponent
-
-    return ShelfItem(
-      id: id,
-      title: title,
-      kind: kind,
-      fileName: originalName,
-      relativePath: "Items/\(id.uuidString)/\(originalName)"
-    )
+    if let string = pasteboard.string(forType: .URL), let url = URL(string: string) {
+      return await importText(url.absoluteString, kind: .link, into: repository, origin: origin, expiresAt: expiresAt)
+    }
+    if let string = pasteboard.string(forType: .string), !string.isEmpty {
+      let kind: ShelfKind = URL(string: string)?.scheme == nil ? .text : .link
+      return await importText(string, kind: kind, into: repository, origin: origin, expiresAt: expiresAt)
+    }
+    return ProviderImportResult()
   }
 
-  func makeTextItem(_ text: String) -> ShelfItem {
-    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-    let firstLine = trimmed.split(separator: "\n", omittingEmptySubsequences: true).first
-    let title = firstLine.map { String($0.prefix(54)) } ?? "Text"
-    return ShelfItem(title: title.isEmpty ? "Text" : title, kind: .text, text: text)
+  private func importText(
+    _ text: String,
+    kind: ShelfKind,
+    into repository: ShelfRepository,
+    origin: ShelfOrigin,
+    expiresAt: Date?
+  ) async -> ProviderImportResult {
+    do {
+      let item = try await repository.addText(text, kind: kind, origin: origin, expiresAt: expiresAt)
+      return ProviderImportResult(items: [item])
+    } catch {
+      return ProviderImportResult(errors: [error.localizedDescription])
+    }
   }
 
-  func makeLinkItem(_ url: URL) -> ShelfItem {
-    let title = url.host(percentEncoded: false) ?? url.absoluteString
-    return ShelfItem(title: title, kind: .link, text: url.absoluteString)
-  }
-
-  func makeImageItem(_ image: NSImage) throws -> ShelfItem {
-    try prepareStorage()
+  private func importImage(
+    _ image: NSImage,
+    into repository: ShelfRepository,
+    origin: ShelfOrigin,
+    expiresAt: Date?
+  ) async throws -> ImportOutcome {
     guard let data = image.pngData else {
       throw ImportError.couldNotEncodeImage
     }
-
-    let id = UUID()
-    let fileName = "Image-\(id.uuidString.prefix(8)).png"
-    let itemDirectory = itemsDirectory.appendingPathComponent(id.uuidString, isDirectory: true)
-    let destination = itemDirectory.appendingPathComponent(fileName)
-    try fileManager.createDirectory(at: itemDirectory, withIntermediateDirectories: true)
-    try data.write(to: destination, options: [.atomic])
-
-    return ShelfItem(
-      id: id,
-      title: "Image",
-      kind: .image,
-      fileName: fileName,
-      relativePath: "Items/\(id.uuidString)/\(fileName)"
-    )
+    let temporaryURL = try await Task.detached(priority: .utility) {
+      let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("BarrelImport-\(UUID().uuidString)", isDirectory: true)
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      let url = directory.appendingPathComponent("Image.png")
+      try data.write(to: url, options: .atomic)
+      return url
+    }.value
+    defer { try? FileManager.default.removeItem(at: temporaryURL.deletingLastPathComponent()) }
+    return await repository.importFiles([temporaryURL], origin: origin, expiresAt: expiresAt)
   }
 
-  func deleteFiles(for item: ShelfItem) {
-    if let url = resolvedURL(for: item) {
-      try? fileManager.removeItem(at: url.deletingLastPathComponent())
-    }
-    item.children.forEach(deleteFiles)
-  }
-
-  func importItems(from providers: [NSItemProvider]) async throws -> [ShelfItem] {
-    var imported: [ShelfItem] = []
-
-    for provider in providers {
-      if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier),
-         let url = try await provider.loadURL(typeIdentifier: UTType.fileURL.identifier) {
-        imported.append(try makeFileItem(from: url))
-      } else if provider.canLoadObject(ofClass: NSImage.self) {
-        let image = try await provider.loadObject(NSImage.self)
-        imported.append(try makeImageItem(image))
-      } else if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier),
-                let url = try await provider.loadURL(typeIdentifier: UTType.url.identifier) {
-        imported.append(makeLinkItem(url))
-      } else if provider.hasItemConformingToTypeIdentifier(UTType.text.identifier),
-                let text = try await provider.loadString(typeIdentifier: UTType.text.identifier) {
-        if let url = URL(string: text), url.scheme != nil {
-          imported.append(makeLinkItem(url))
-        } else {
-          imported.append(makeTextItem(text))
-        }
-      }
-    }
-
-    return imported
+  private func append(_ outcome: ImportOutcome, to result: inout ProviderImportResult) {
+    result.items.append(contentsOf: outcome.successes)
+    result.errors.append(contentsOf: outcome.failures.map(\.message))
   }
 
   enum ImportError: LocalizedError {
     case couldNotEncodeImage
 
     var errorDescription: String? {
-      switch self {
-      case .couldNotEncodeImage: "The pasted image could not be saved."
-      }
+      "The pasted image could not be saved."
     }
   }
 }
@@ -165,26 +151,16 @@ private extension NSImage {
 private extension NSItemProvider {
   func loadURL(typeIdentifier: String) async throws -> URL? {
     let item = try await loadItemValue(typeIdentifier: typeIdentifier)
-    if let url = item as? URL {
-      return url
-    }
-    if let data = item as? Data {
-      return URL(dataRepresentation: data, relativeTo: nil)
-    }
-    if let string = item as? String {
-      return URL(string: string)
-    }
+    if let url = item as? URL { return url }
+    if let data = item as? Data { return URL(dataRepresentation: data, relativeTo: nil) }
+    if let string = item as? String { return URL(string: string) }
     return nil
   }
 
   func loadString(typeIdentifier: String) async throws -> String? {
     let item = try await loadItemValue(typeIdentifier: typeIdentifier)
-    if let string = item as? String {
-      return string
-    }
-    if let data = item as? Data {
-      return String(data: data, encoding: .utf8)
-    }
+    if let string = item as? String { return string }
+    if let data = item as? Data { return String(data: data, encoding: .utf8) }
     return nil
   }
 

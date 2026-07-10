@@ -1,7 +1,8 @@
+import BarrelCore
 import SwiftUI
 
 struct SettingsView: View {
-  @AppStorage("CaptureClipboardHistory") private var captureClipboardHistory = true
+  @AppStorage("CaptureClipboardHistory") private var captureClipboardHistory = false
   @AppStorage("AutoHideShelf") private var autoHideShelf = true
   @AppStorage("ShelfEdge") private var shelfEdge = "left"
 

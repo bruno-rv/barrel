@@ -1,14 +1,13 @@
+import BarrelCore
 import SwiftUI
 import UniformTypeIdentifiers
 
 struct ContentView: View {
   @ObservedObject var store: ShelfStore
-  @AppStorage("CaptureClipboardHistory") private var captureClipboardHistory = true
+  @AppStorage("CaptureClipboardHistory") private var captureClipboardHistory = false
   @AppStorage("AutoHideShelf") private var autoHideShelf = true
   @AppStorage("ShelfEdge") private var shelfEdge = "left"
   @State private var isDropTargeted = false
-
-  private let clipboardTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
   var body: some View {
     ZStack {
@@ -18,7 +17,7 @@ struct ContentView: View {
         header
         searchAndFilters
 
-        if store.visibleItems().isEmpty {
+        if store.visibleItems.isEmpty {
           emptyShelf
         } else {
           shelfItems
@@ -41,10 +40,11 @@ struct ContentView: View {
       store.importProviders(providers)
       return true
     }
-    .onReceive(clipboardTimer) { _ in
-      if captureClipboardHistory {
-        store.captureClipboardIfChanged()
-      }
+    .onAppear {
+      store.setClipboardCapture(enabled: captureClipboardHistory)
+    }
+    .onChange(of: captureClipboardHistory) {
+      store.setClipboardCapture(enabled: captureClipboardHistory)
     }
     .alert("Barrel could not finish that action", isPresented: errorBinding) {
       Button("OK") {
@@ -80,7 +80,7 @@ struct ContentView: View {
         Text("Barrel")
           .font(.headline.weight(.bold))
           .foregroundStyle(.white)
-        Text("\(store.items.count) held items")
+        Text("\(store.liveItemCount) held items")
           .font(.caption)
           .foregroundStyle(.white.opacity(0.62))
       }
@@ -126,7 +126,7 @@ struct ContentView: View {
   private var shelfItems: some View {
     ScrollView {
       LazyVStack(spacing: 8) {
-        ForEach(store.visibleItems()) { item in
+        ForEach(store.visibleItems) { item in
           ShelfTile(
             item: item,
             isSelected: store.selectedItemID == item.id,
@@ -137,7 +137,7 @@ struct ContentView: View {
             open: { store.open(item) },
             reveal: { store.reveal(item) },
             split: { store.splitStack(item) },
-            delete: { store.delete(item) },
+            delete: { store.trash(item) },
             itemProvider: { store.itemProvider(for: item) }
           )
         }
@@ -191,7 +191,7 @@ struct ContentView: View {
       .help("Stack marked items")
 
       Button(role: .destructive) {
-        store.deleteSelectedItems()
+        store.trashSelectedItems()
       } label: {
         Image(systemName: "trash")
       }

@@ -1,4 +1,5 @@
 import AppKit
+import BarrelCore
 import SwiftUI
 
 struct DetailView: View {
@@ -135,7 +136,7 @@ struct DetailView: View {
       Spacer()
 
       Button(role: .destructive) {
-        store.delete(item)
+        store.trash(item)
       } label: {
         Label("Delete", systemImage: "trash")
       }

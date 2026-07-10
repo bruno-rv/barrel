@@ -1,37 +1,45 @@
 import AppKit
+import BarrelCore
 import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
 
 @MainActor
 final class ShelfStore: ObservableObject {
-  @Published var items: [ShelfItem] = []
+  @Published private(set) var items: [ShelfItem] = []
+  @Published private(set) var visibleItems: [ShelfItem] = []
   @Published var selectedIDs: Set<ShelfItem.ID> = []
   @Published var selectedItemID: ShelfItem.ID?
-  @Published var searchText = ""
-  @Published var filter: ShelfFilter = .all
+  @Published var searchText = "" { didSet { recomputeVisibleItems() } }
+  @Published var filter: ShelfFilter = .all { didSet { recomputeVisibleItems() } }
   @Published var errorMessage: String?
+  @Published private(set) var isImporting = false
+  @Published private(set) var storageUsage: Int64 = 0
 
+  private let repository: ShelfRepository
   private let importer: ImportService
+  private var fileURLsByItemID: [UUID: URL] = [:]
+  private var clipboardTask: Task<Void, Never>?
   private var lastPasteboardChangeCount = NSPasteboard.general.changeCount
 
-  init(importer: ImportService = ImportService()) {
-    self.importer = importer
-    load()
+  init(
+    repository: ShelfRepository = BarrelEnvironment.shared.repository,
+    importer: ImportService? = nil,
+    loadOnInit: Bool = true
+  ) {
+    self.repository = repository
+    self.importer = importer ?? ImportService()
+    if loadOnInit {
+      Task { await load() }
+    }
   }
 
   var selectedItem: ShelfItem? {
-    guard let selectedItemID else {
-      return nil
-    }
-    return item(with: selectedItemID)
+    selectedItemID.flatMap(item(with:))
   }
 
-  func visibleItems() -> [ShelfItem] {
-    let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-    return items.filter { item in
-      filter.accepts(item) && (query.isEmpty || item.matches(query))
-    }
+  var liveItemCount: Int {
+    items.lazy.filter { $0.trashedAt == nil }.count
   }
 
   func item(with id: ShelfItem.ID) -> ShelfItem? {
@@ -39,7 +47,7 @@ final class ShelfStore: ObservableObject {
   }
 
   func fileURL(for item: ShelfItem) -> URL? {
-    importer.resolvedURL(for: item)
+    fileURLsByItemID[item.id]
   }
 
   func importWithOpenPanel() {
@@ -54,53 +62,64 @@ final class ShelfStore: ObservableObject {
   }
 
   func importURLs(_ urls: [URL]) {
-    do {
-      let imported = try urls.map { try importer.makeFileItem(from: $0) }
-      insert(imported)
-    } catch {
-      errorMessage = error.localizedDescription
+    Task {
+      isImporting = true
+      let outcome = await repository.importFiles(urls, origin: .imported, expiresAt: nil)
+      isImporting = false
+      report(errors: outcome.failures.map(\.message))
+      await refresh(preferredSelection: outcome.successes.first?.id)
     }
   }
 
   func importProviders(_ providers: [NSItemProvider]) {
     Task {
-      do {
-        let imported = try await importer.importItems(from: providers)
-        insert(imported)
-      } catch {
-        errorMessage = error.localizedDescription
-      }
+      isImporting = true
+      let result = await importer.importItems(
+        from: providers,
+        into: repository,
+        origin: .imported,
+        expiresAt: nil
+      )
+      isImporting = false
+      report(errors: result.errors)
+      await refresh(preferredSelection: result.items.first?.id)
     }
   }
 
   func pasteFromClipboard() {
-    let pasteboard = NSPasteboard.general
-
-    do {
-      let imported = try clipboardItems(from: pasteboard)
-      if imported.isEmpty {
+    Task {
+      let pasteboard = NSPasteboard.general
+      let result = await importer.importPasteboard(
+        pasteboard,
+        into: repository,
+        origin: .imported,
+        expiresAt: nil
+      )
+      lastPasteboardChangeCount = pasteboard.changeCount
+      if result.items.isEmpty && result.errors.isEmpty {
         errorMessage = "The clipboard does not contain a file, image, link, or text item."
       } else {
-        lastPasteboardChangeCount = pasteboard.changeCount
-        insert(imported)
+        report(errors: result.errors)
+        await refresh(preferredSelection: result.items.first?.id)
       }
-    } catch {
-      errorMessage = error.localizedDescription
     }
   }
 
-  func captureClipboardIfChanged() {
-    let pasteboard = NSPasteboard.general
-    guard pasteboard.changeCount != lastPasteboardChangeCount else {
-      return
-    }
-    lastPasteboardChangeCount = pasteboard.changeCount
-
-    do {
-      let imported = try clipboardItems(from: pasteboard)
-      insert(imported)
-    } catch {
-      errorMessage = error.localizedDescription
+  func setClipboardCapture(enabled: Bool) {
+    clipboardTask?.cancel()
+    clipboardTask = nil
+    guard enabled else { return }
+    lastPasteboardChangeCount = NSPasteboard.general.changeCount
+    clipboardTask = Task { [weak self] in
+      while !Task.isCancelled {
+        do {
+          try await Task.sleep(for: .seconds(2))
+        } catch {
+          return
+        }
+        guard let self else { return }
+        await self.captureClipboardIfChanged()
+      }
     }
   }
 
@@ -118,56 +137,102 @@ final class ShelfStore: ObservableObject {
   }
 
   func stackSelectedItems() {
-    let selected = items.filter { selectedIDs.contains($0.id) }
-    guard selected.count > 1 else {
-      return
+    let ids = Array(selectedIDs)
+    guard ids.count > 1 else { return }
+    Task {
+      do {
+        let stack = try await repository.stack(ids: ids)
+        selectedIDs = []
+        await refresh(preferredSelection: stack.id)
+      } catch {
+        errorMessage = error.localizedDescription
+      }
     }
-
-    let stack = ShelfItem(title: stackTitle(for: selected), kind: .stack, children: selected)
-    items.removeAll { selectedIDs.contains($0.id) }
-    items.insert(stack, at: 0)
-    selectedIDs = []
-    selectedItemID = stack.id
-    save()
   }
 
   func splitStack(_ stack: ShelfItem) {
-    guard let index = items.firstIndex(where: { $0.id == stack.id }), stack.isStack else {
-      return
+    Task {
+      do {
+        try await repository.split(id: stack.id)
+        await refresh(preferredSelection: stack.children.first?.id)
+      } catch {
+        errorMessage = error.localizedDescription
+      }
     }
-    items.remove(at: index)
-    items.insert(contentsOf: stack.children, at: index)
-    selectedItemID = stack.children.first?.id
-    save()
   }
 
   func rename(_ item: ShelfItem, title: String) {
-    guard let index = items.firstIndex(where: { $0.id == item.id }) else {
-      return
+    Task {
+      do {
+        try await repository.rename(id: item.id, title: title)
+        await refresh(preferredSelection: item.id)
+      } catch {
+        errorMessage = error.localizedDescription
+      }
     }
-    let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-    items[index].title = trimmed.isEmpty ? item.title : trimmed
-    items[index].updatedAt = .now
-    save()
   }
 
-  func delete(_ item: ShelfItem) {
-    importer.deleteFiles(for: item)
-    items.removeAll { $0.id == item.id }
-    selectedIDs.remove(item.id)
-    if selectedItemID == item.id {
-      selectedItemID = items.first?.id
+  func setPinned(_ item: ShelfItem, isPinned: Bool) {
+    Task {
+      do {
+        try await repository.setPinned(id: item.id, isPinned: isPinned)
+        await refresh(preferredSelection: item.id)
+      } catch {
+        errorMessage = error.localizedDescription
+      }
     }
-    save()
   }
 
-  func deleteSelectedItems() {
-    let targets = items.filter { selectedIDs.contains($0.id) }
-    targets.forEach { importer.deleteFiles(for: $0) }
-    items.removeAll { selectedIDs.contains($0.id) }
-    selectedIDs = []
-    selectedItemID = items.first?.id
-    save()
+  func setExpiration(_ item: ShelfItem, preset: ShelfExpirationPreset) {
+    Task {
+      do {
+        try await repository.setExpiration(id: item.id, date: preset.expirationDate(from: .now))
+        await refresh(preferredSelection: item.id)
+      } catch {
+        errorMessage = error.localizedDescription
+      }
+    }
+  }
+
+  func trash(_ item: ShelfItem) {
+    trash(ids: [item.id])
+  }
+
+  func trashSelectedItems() {
+    trash(ids: Array(selectedIDs))
+  }
+
+  func restore(_ item: ShelfItem) {
+    Task {
+      do {
+        try await repository.restore(ids: [item.id])
+        await refresh(preferredSelection: item.id)
+      } catch {
+        errorMessage = error.localizedDescription
+      }
+    }
+  }
+
+  func emptyTrash() {
+    Task {
+      do {
+        try await repository.emptyTrash()
+        await refresh()
+      } catch {
+        errorMessage = error.localizedDescription
+      }
+    }
+  }
+
+  func cleanup() {
+    Task {
+      do {
+        try await repository.cleanup()
+        await refresh()
+      } catch {
+        errorMessage = error.localizedDescription
+      }
+    }
   }
 
   func reveal(_ item: ShelfItem) {
@@ -194,66 +259,87 @@ final class ShelfStore: ObservableObject {
     return NSItemProvider(object: item.title as NSString)
   }
 
-  private func load() {
+  private func load() async {
     do {
-      items = try importer.loadManifest()
-      selectedItemID = items.first?.id
+      _ = try await repository.load()
+      await refresh()
     } catch {
       errorMessage = error.localizedDescription
     }
   }
 
-  private func insert(_ newItems: [ShelfItem]) {
-    guard !newItems.isEmpty else {
-      return
-    }
-    items.insert(contentsOf: newItems, at: 0)
-    selectedItemID = newItems.first?.id
-    save()
-  }
-
-  private func save() {
-    do {
-      try importer.saveManifest(items)
-    } catch {
-      errorMessage = error.localizedDescription
-    }
-  }
-
-  private func stackTitle(for items: [ShelfItem]) -> String {
-    let firstTwo = items.prefix(2).map(\.title).joined(separator: ", ")
-    if items.count > 2 {
-      return "\(firstTwo) + \(items.count - 2)"
-    }
-    return firstTwo
-  }
-
-  private func clipboardItems(from pasteboard: NSPasteboard) throws -> [ShelfItem] {
-    if let fileURLs = pasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL], !fileURLs.isEmpty {
-      return try fileURLs.map { try importer.makeFileItem(from: $0) }
-    }
-    if let image = NSImage(pasteboard: pasteboard) {
-      return [try importer.makeImageItem(image)]
-    }
-    if let string = pasteboard.string(forType: .URL),
-       let url = URL(string: string) {
-      return [importer.makeLinkItem(url)]
-    }
-    if let string = pasteboard.string(forType: .string), !string.isEmpty {
-      if let url = URL(string: string), url.scheme != nil {
-        return [importer.makeLinkItem(url)]
+  private func refresh(preferredSelection: UUID? = nil) async {
+    items = await repository.snapshot()
+    var resolvedURLs: [UUID: URL] = [:]
+    for item in items {
+      if let url = await repository.fileURL(for: item) {
+        resolvedURLs[item.id] = url
       }
-      return [importer.makeTextItem(string)]
     }
-    return []
+    fileURLsByItemID = resolvedURLs
+    storageUsage = (try? await repository.storageUsage()) ?? 0
+    recomputeVisibleItems()
+    selectedIDs.formIntersection(Set(items.map(\.id)))
+    if let preferredSelection {
+      selectedItemID = preferredSelection
+    } else if selectedItemID.flatMap(item(with:)) == nil {
+      selectedItemID = visibleItems.first?.id
+    }
+  }
+
+  private func recomputeVisibleItems() {
+    visibleItems = filter.filter(items, query: searchText)
+  }
+
+  private func captureClipboardIfChanged() async {
+    let pasteboard = NSPasteboard.general
+    guard pasteboard.changeCount != lastPasteboardChangeCount else { return }
+    lastPasteboardChangeCount = pasteboard.changeCount
+    let hours = max(UserDefaults.standard.integer(forKey: "ClipboardLifetimeHours"), 1)
+    let expiresAt = RetentionPolicy(clipboardLifetime: TimeInterval(hours * 3_600))
+      .expirationDate(for: .clipboard, now: .now)
+    let result = await importer.importPasteboard(
+      pasteboard,
+      into: repository,
+      origin: .clipboard,
+      expiresAt: expiresAt
+    )
+    report(errors: result.errors)
+    if !result.items.isEmpty {
+      await refresh(preferredSelection: result.items.first?.id)
+    }
+  }
+
+  private func trash(ids: [UUID]) {
+    guard !ids.isEmpty else { return }
+    Task {
+      do {
+        try await repository.trash(ids: ids)
+        selectedIDs.subtract(ids)
+        await refresh()
+      } catch {
+        errorMessage = error.localizedDescription
+      }
+    }
+  }
+
+  private func report(errors: [String]) {
+    if !errors.isEmpty {
+      errorMessage = errors.joined(separator: "\n")
+    }
   }
 }
 
 extension ShelfStore {
-  @MainActor
   static var preview: ShelfStore {
-    let store = ShelfStore(importer: ImportService())
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("BarrelPreview-\(UUID().uuidString)", isDirectory: true)
+    let repository = ShelfRepository(
+      configuration: RepositoryConfiguration(rootURL: root, deviceID: "preview")
+    )
+    let store = ShelfStore(repository: repository, loadOnInit: false)
     store.items = [.sampleStack, .samplePDF, .sampleText, .sampleLink]
+    store.visibleItems = store.items
     store.selectedItemID = ShelfItem.sampleStack.id
     return store
   }

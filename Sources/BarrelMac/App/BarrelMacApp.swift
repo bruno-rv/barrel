@@ -1,4 +1,5 @@
 import AppKit
+import BarrelCore
 import SwiftUI
 
 @main
@@ -37,7 +38,7 @@ struct BarrelMacApp: App {
         .disabled(store.selectedIDs.count < 2)
 
         Button("Delete Selection") {
-          store.deleteSelectedItems()
+          store.trashSelectedItems()
         }
         .keyboardShortcut(.delete, modifiers: [])
         .disabled(store.selectedIDs.isEmpty)
@@ -66,7 +67,7 @@ struct BarrelMacApp: App {
       .disabled(store.selectedIDs.count < 2)
 
       Button("Delete Selection") {
-        store.deleteSelectedItems()
+        store.trashSelectedItems()
       }
       .disabled(store.selectedIDs.isEmpty)
 

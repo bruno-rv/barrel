@@ -53,4 +53,11 @@ public enum ShelfFilter: String, CaseIterable, Codable, Identifiable, Sendable {
     case .trash: false
     }
   }
+
+  public func filter(_ items: [ShelfItem], query: String) -> [ShelfItem] {
+    let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+    return items.filter { item in
+      accepts(item) && (query.isEmpty || item.matches(query))
+    }
+  }
 }

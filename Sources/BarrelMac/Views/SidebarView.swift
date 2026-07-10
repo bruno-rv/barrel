@@ -1,3 +1,4 @@
+import BarrelCore
 import SwiftUI
 
 struct SidebarView: View {
@@ -9,11 +10,11 @@ struct SidebarView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
 
-      if store.visibleItems().isEmpty {
+      if store.visibleItems.isEmpty {
         EmptyShelfView(store: store)
       } else {
         List(selection: $store.selectedItemID) {
-          ForEach(store.visibleItems()) { item in
+          ForEach(store.visibleItems) { item in
             ShelfRow(
               item: item,
               isMarked: store.selectedIDs.contains(item.id)
@@ -43,7 +44,7 @@ struct SidebarView: View {
               }
               Divider()
               Button("Delete", role: .destructive) {
-                store.delete(item)
+                store.trash(item)
               }
             }
           }
