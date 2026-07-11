@@ -3,6 +3,10 @@
 Barrel stores shelf metadata and managed file copies in its Application
 Support directory. It leaves the original files unchanged.
 
+Barrel uses AppKit local and global mouse-event monitors transiently to reveal
+the shelf at the display edge. It doesn't store pointer coordinates or request
+Accessibility access.
+
 ## Clipboard capture
 
 Clipboard history is off by default. When you enable it, Barrel checks for

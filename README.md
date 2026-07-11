@@ -19,6 +19,17 @@ panel, or pasting supported clipboard content. You can then drag items out,
 open them, reveal files in Finder, rename them, pin them, or combine them into
 stacks.
 
+By default, Barrel hides completely beyond the left edge of the display under
+your pointer. Move the pointer to that edge to reveal the shelf after a short
+delay. The same shelf follows the pointer across displays and Spaces, appears
+over full-screen apps, and doesn't take keyboard focus when you reveal it by
+hovering. It remains open while you drag items into or out of it and hides only
+after the drag ends and the pointer leaves.
+
+In **Settings**, you can move the shelf to the right edge or turn off
+**Auto-hide shelf at screen edge** to keep it visible. Barrel preserves these
+settings when you relaunch it.
+
 Clipboard history is off by default. If you enable it, Barrel polls for
 supported clipboard changes and gives automatic captures a 24-hour lifetime.
 You can change the lifetime or pin an item to keep it.
