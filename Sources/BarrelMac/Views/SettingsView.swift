@@ -1,0 +1,121 @@
+import SwiftUI
+
+struct SettingsView: View {
+  @ObservedObject var store: ShelfStore
+  @ObservedObject var syncController: SyncController
+  @ObservedObject var hotKeyController: GlobalHotKeyController
+  @AppStorage("CaptureClipboardHistory") private var captureClipboardHistory = false
+  @AppStorage("ClipboardLifetimeHours") private var clipboardLifetimeHours = 24
+  @AppStorage("StorageQuotaBytes") private var storageQuotaBytes = 1_073_741_824
+  @AppStorage("AutoHideShelf") private var autoHideShelf = true
+  @AppStorage("ShelfEdge") private var shelfEdge = "left"
+  @AppStorage("GlobalHotKeyEnabled") private var globalHotKeyEnabled = true
+  @AppStorage("GlobalHotKeyChoice") private var globalHotKeyChoice = GlobalHotKeyChoice.controlOptionSpace.rawValue
+  @AppStorage("CloudSyncEnabled") private var cloudSyncEnabled = false
+
+  var body: some View {
+    Form {
+      Section("Shelf") {
+        Picker("Shelf edge", selection: $shelfEdge) {
+          Text("Left").tag("left")
+          Text("Right").tag("right")
+        }
+        .pickerStyle(.segmented)
+
+        Toggle("Auto-hide shelf at screen edge", isOn: $autoHideShelf)
+      }
+
+      Section("Clipboard Privacy") {
+        Toggle("Capture clipboard history", isOn: $captureClipboardHistory)
+        Picker("Automatic capture lifetime", selection: $clipboardLifetimeHours) {
+          Text("1 hour").tag(1)
+          Text("24 hours").tag(24)
+          Text("1 week").tag(168)
+        }
+        .disabled(!captureClipboardHistory)
+
+        Text("Clipboard capture is off by default. When enabled, Barrel copies supported clipboard content into its private Application Support folder and expires it after the selected lifetime unless pinned.")
+          .font(.footnote)
+          .foregroundStyle(.secondary)
+      }
+
+      Section("Global Shortcut") {
+        Toggle("Enable global shelf shortcut", isOn: $globalHotKeyEnabled)
+        Picker("Shortcut", selection: $globalHotKeyChoice) {
+          ForEach(GlobalHotKeyChoice.allCases) { choice in
+            Text(choice.label).tag(choice.rawValue)
+          }
+        }
+        .disabled(!globalHotKeyEnabled)
+        if let registrationError = hotKeyController.registrationError {
+          Text(registrationError)
+            .font(.footnote)
+            .foregroundStyle(.red)
+        }
+      }
+
+      Section("Storage") {
+        Picker("Storage quota", selection: $storageQuotaBytes) {
+          Text("256 MB").tag(268_435_456)
+          Text("512 MB").tag(536_870_912)
+          Text("1 GB").tag(1_073_741_824)
+          Text("2 GB").tag(2_147_483_648)
+        }
+        Text("Using \(formattedStorageUsage)")
+          .foregroundStyle(.secondary)
+        Button("Clean Up Now") {
+          store.cleanup()
+        }
+
+        Text("Cleanup expires unpinned items first, then removes the oldest automatic clipboard captures. Deliberate imports are never selected solely to satisfy the quota.")
+          .font(.footnote)
+          .foregroundStyle(.secondary)
+      }
+
+      Section("Multi-Mac Sync") {
+        Toggle("Enable CloudKit sync", isOn: $cloudSyncEnabled)
+        LabeledContent("Container", value: syncController.containerIdentifier)
+        LabeledContent("Status", value: syncController.statusText)
+        Button("Sync Now") {
+          syncController.syncNow()
+        }
+        .disabled(!syncController.canSync)
+
+        Text("Sync is off by default. Enabling it requires a provisioned Apple Developer Team, the matching iCloud container, and CloudKit entitlements. If those capabilities are unavailable, Barrel continues storing items locally.")
+          .font(.footnote)
+          .foregroundStyle(.secondary)
+      }
+
+      Text("Barrel stores imported copies in Application Support and keeps original files untouched. Deleted items remain recoverable in Trash until emptied or removed after seven days.")
+        .font(.footnote)
+        .foregroundStyle(.secondary)
+    }
+    .padding(20)
+    .frame(width: 460)
+    .onAppear {
+      store.setClipboardCapture(enabled: captureClipboardHistory)
+      store.setStorageQuota(storageQuotaBytes)
+    }
+    .onChange(of: captureClipboardHistory) {
+      store.setClipboardCapture(enabled: captureClipboardHistory)
+    }
+    .onChange(of: storageQuotaBytes) {
+      store.setStorageQuota(storageQuotaBytes)
+    }
+    .onChange(of: cloudSyncEnabled) {
+      syncController.setEnabled(cloudSyncEnabled)
+    }
+  }
+
+  private var formattedStorageUsage: String {
+    ByteCountFormatter.string(fromByteCount: store.storageUsage, countStyle: .file)
+  }
+}
+
+#Preview {
+  SettingsView(
+    store: .preview,
+    syncController: SyncController(),
+    hotKeyController: .shared
+  )
+}
