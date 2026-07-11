@@ -50,7 +50,11 @@ public struct RetentionPolicy: Sendable {
     if projectedBytes > max(quotaBytes, 0) {
       let expiredIDs = Set(candidates)
       let clipboardItems = liveItems
-        .filter { $0.origin == .clipboard && !$0.isPinned && !expiredIDs.contains($0.id) }
+        .filter {
+          $0.origin == .clipboard
+            && !$0.containsPinnedItem
+            && !expiredIDs.contains($0.id)
+        }
         .sorted(by: cleanupOrder)
       for item in clipboardItems where projectedBytes > max(quotaBytes, 0) {
         candidates.append(item.id)

@@ -67,6 +67,7 @@ public struct CleanupOutcome: Equatable, Sendable {
 
 public enum RepositoryError: Error, Equatable, Sendable {
   case corruptManifest
+  case missingSyncAsset(String)
   case itemNotFound(UUID)
   case invalidStack(UUID)
   case invalidSelection
@@ -77,6 +78,8 @@ extension RepositoryError: LocalizedError {
     switch self {
     case .corruptManifest:
       "Barrel could not read the shelf manifest. A backup of the corrupt file was preserved."
+    case .missingSyncAsset(let path):
+      "The synced item advertised an asset at \(path), but the asset was not downloaded."
     case .itemNotFound:
       "The shelf item no longer exists."
     case .invalidStack:

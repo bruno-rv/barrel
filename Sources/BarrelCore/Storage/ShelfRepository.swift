@@ -46,7 +46,10 @@ public actor ShelfRepository {
       decoded = try decoder.decode([ShelfItem].self, from: data)
     } catch {
       try preserveCorruptManifest()
+      try fileManager.removeItem(at: manifestURL)
       items = []
+      isLoaded = true
+      try? clearStaging()
       throw RepositoryError.corruptManifest
     }
 
@@ -415,8 +418,7 @@ public actor ShelfRepository {
       let existingURL = managedURL(for: remotePath)
       if existingURL.map({ fileManager.fileExists(atPath: $0.path) }) != true {
         guard let assetURL = assets[remotePath] else {
-          item.relativePath = nil
-          return
+          throw RepositoryError.missingSyncAsset(remotePath)
         }
         let proposedName = item.fileName ?? assetURL.lastPathComponent
         let safeFileName = proposedName.isEmpty
@@ -665,7 +667,11 @@ public actor ShelfRepository {
     let expired = liveItems.filter { $0.isExpired(at: now) }.sorted(by: cleanupOrder)
     let expiredIDs = Set(expired.map(\.id))
     let clipboard = liveItems
-      .filter { $0.origin == .clipboard && !$0.isPinned && !expiredIDs.contains($0.id) }
+      .filter {
+        $0.origin == .clipboard
+          && !$0.containsPinnedItem
+          && !expiredIDs.contains($0.id)
+      }
       .sorted(by: cleanupOrder)
     let removalRank = Dictionary(
       uniqueKeysWithValues: (expired + clipboard).enumerated().map { ($0.element.id, $0.offset) }

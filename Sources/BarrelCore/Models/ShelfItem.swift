@@ -117,6 +117,9 @@ public struct ShelfItem: Identifiable, Codable, Hashable, Sendable {
 
   public var isStack: Bool { kind == .stack }
   public var isPermanentlyDeleted: Bool { deletedAt != nil }
+  public var containsPinnedItem: Bool {
+    isPinned || children.contains(where: \.containsPinnedItem)
+  }
 
   public var detail: String {
     if isStack {
@@ -136,7 +139,7 @@ public struct ShelfItem: Identifiable, Codable, Hashable, Sendable {
   }
 
   public func isExpired(at date: Date) -> Bool {
-    !isPinned && expiresAt.map { $0 <= date } == true
+    !containsPinnedItem && expiresAt.map { $0 <= date } == true
   }
 
   public func matches(_ query: String) -> Bool {

@@ -4,6 +4,7 @@ import Foundation
 
 actor CloudKitSyncService: SyncTransport {
   static let defaultContainerIdentifier = "iCloud.dev.bruno.barrel"
+  static let recordSavePolicy: CKModifyRecordsOperation.RecordSavePolicy = .allKeys
 
   private let database: CKDatabase
   private let zoneID = CKRecordZone.ID(zoneName: "Barrel", ownerName: CKCurrentUserDefaultName)
@@ -51,7 +52,7 @@ actor CloudKitSyncService: SyncTransport {
       try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
         let state = CloudOperationState()
         let operation = CKModifyRecordsOperation(recordsToSave: cloudRecords)
-        operation.savePolicy = .changedKeys
+        operation.savePolicy = Self.recordSavePolicy
         operation.isAtomic = false
         operation.perRecordSaveBlock = { _, result in
           if case .failure(let error) = result { state.record(error: error) }
@@ -140,9 +141,9 @@ actor CloudKitSyncService: SyncTransport {
     record["modifiedByDeviceID"] = syncRecord.item.modifiedByDeviceID as CKRecordValue
     let paths = syncRecord.assetsByRelativePath.keys.sorted()
     record["assetPaths"] = try JSONEncoder().encode(paths) as CKRecordValue
-    for (index, path) in paths.enumerated() {
+    for (fieldName, path) in zip(Self.assetFieldNames(assetCount: paths.count), paths) {
       if let url = syncRecord.assetsByRelativePath[path] {
-        record["asset\(index)"] = CKAsset(fileURL: url)
+        record[fieldName] = CKAsset(fileURL: url)
       }
     }
     return record
@@ -163,7 +164,9 @@ actor CloudKitSyncService: SyncTransport {
     } ?? []
     var assets: [String: URL] = [:]
     for (index, path) in paths.enumerated() {
-      guard let sourceURL = (record["asset\(index)"] as? CKAsset)?.fileURL else { continue }
+      guard let sourceURL = (record["asset\(index)"] as? CKAsset)?.fileURL else {
+        throw CloudKitSyncError.missingAsset(path)
+      }
       let destination = stagingRootURL
         .appendingPathComponent(UUID().uuidString, isDirectory: true)
         .appendingPathComponent(sourceURL.lastPathComponent)
@@ -175,6 +178,10 @@ actor CloudKitSyncService: SyncTransport {
       assets[path] = destination
     }
     return SyncRecord(item: item, assetsByRelativePath: assets)
+  }
+
+  nonisolated static func assetFieldNames(assetCount: Int) -> [String] {
+    (0..<assetCount).map { "asset\($0)" }
   }
 }
 
@@ -215,9 +222,11 @@ private final class CloudOperationCancellation: @unchecked Sendable {
 
 private enum CloudKitSyncError: LocalizedError {
   case missingPayload(String)
+  case missingAsset(String)
   var errorDescription: String? {
     switch self {
     case .missingPayload(let recordName): "CloudKit record \(recordName) has no item payload."
+    case .missingAsset(let path): "CloudKit record is missing its advertised asset at \(path)."
     }
   }
 }

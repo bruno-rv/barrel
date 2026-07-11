@@ -25,6 +25,11 @@ let package = Package(
       name: "BarrelCoreTests",
       dependencies: ["BarrelCore"],
       swiftSettings: [.swiftLanguageMode(.v5)]
+    ),
+    .testTarget(
+      name: "BarrelMacTests",
+      dependencies: ["BarrelMac"],
+      swiftSettings: [.swiftLanguageMode(.v5)]
     )
   ]
 )

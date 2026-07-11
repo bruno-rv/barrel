@@ -59,6 +59,17 @@ final class ShelfRepositoryTests: XCTestCase {
       .filter { $0.lastPathComponent.hasPrefix("shelf-corrupt-") && $0.pathExtension == "json" }
     XCTAssertEqual(backups.count, 1)
     XCTAssertEqual(try Data(contentsOf: backups[0]), Data("not json".utf8))
+    XCTAssertFalse(fileManager.fileExists(atPath: root.appendingPathComponent("shelf.json").path))
+
+    let recovered = try await repository.addText(
+      "Recovered",
+      kind: .text,
+      origin: .imported,
+      expiresAt: nil
+    )
+    let snapshot = await repository.snapshot()
+    XCTAssertEqual(snapshot.map(\.id), [recovered.id])
+    XCTAssertEqual(snapshot.map(\.title), ["Recovered"])
   }
 
   func testEqualFilesShareOneManagedFile() async throws {
@@ -217,6 +228,31 @@ final class ShelfRepositoryTests: XCTestCase {
     XCTAssertTrue(snapshot.first(where: { $0.id == pinned.id })?.isPinned == true)
   }
 
+  func testCleanupKeepsExpiredClipboardStackWhenAChildIsPinned() async throws {
+    let root = try makeRoot()
+    let repository = ShelfRepository(configuration: configuration(root: root, quotaBytes: 0))
+    let expiration = now.addingTimeInterval(-1)
+    let pinned = try await repository.addText(
+      "Pinned child",
+      kind: .text,
+      origin: .clipboard,
+      expiresAt: expiration
+    )
+    let unpinned = try await repository.addText(
+      "Unpinned child",
+      kind: .text,
+      origin: .clipboard,
+      expiresAt: expiration
+    )
+    try await repository.setPinned(id: pinned.id, isPinned: true)
+    let stack = try await repository.stack(ids: [pinned.id, unpinned.id])
+
+    try await repository.cleanup()
+
+    let snapshot = await repository.snapshot()
+    XCTAssertNil(snapshot.first(where: { $0.id == stack.id })?.trashedAt)
+  }
+
   func testTextStackSplitAndMetadataMutationsPersist() async throws {
     let root = try makeRoot()
     let repository = ShelfRepository(configuration: configuration(root: root))
@@ -372,6 +408,74 @@ final class ShelfRepositoryTests: XCTestCase {
     XCTAssertEqual(record.item.id, remoteItem.id)
     XCTAssertEqual(try Data(contentsOf: managedURL), Data("remote bytes".utf8))
     XCTAssertTrue(managedURL.path.hasPrefix(root.appendingPathComponent("Items").path + "/"))
+  }
+
+  func testApplySyncRecordsRejectsMissingAdvertisedAssetWithoutChangingLocalItem() async throws {
+    let root = try makeRoot()
+    let source = try makeSource(named: "local.txt", contents: "last local bytes")
+    let repository = ShelfRepository(configuration: configuration(root: root))
+    let outcome = await repository.importFiles([source], origin: .imported, expiresAt: nil)
+    let local = try XCTUnwrap(outcome.successes.first)
+    let localPath = try XCTUnwrap(local.relativePath)
+    let resolvedLocalURL = await repository.fileURL(for: local)
+    let localURL = try XCTUnwrap(resolvedLocalURL)
+    var remote = local
+    remote.title = "Newer remote metadata"
+    remote.fileName = "remote.txt"
+    remote.relativePath = "Items/remote/remote.txt"
+    remote.updatedAt = local.updatedAt.addingTimeInterval(1)
+    remote.revision = local.revision + 1
+    remote.modifiedByDeviceID = "remote-mac"
+
+    do {
+      try await repository.applySyncRecords([
+        SyncRecord(item: remote, assetsByRelativePath: [:])
+      ])
+      XCTFail("Expected the missing advertised asset to reject the sync apply")
+    } catch RepositoryError.missingSyncAsset(let path) {
+      XCTAssertEqual(path, remote.relativePath)
+    } catch {
+      XCTFail("Unexpected error: \(error)")
+    }
+
+    let snapshot = await repository.snapshot()
+    let unchanged = try XCTUnwrap(snapshot.first(where: { $0.id == local.id }))
+    XCTAssertEqual(unchanged.title, local.title)
+    XCTAssertEqual(unchanged.relativePath, localPath)
+    XCTAssertEqual(try Data(contentsOf: localURL), Data("last local bytes".utf8))
+  }
+
+  func testApplySyncRecordsAllowsMetadataOnlyItemAndAlreadyPresentAssetPath() async throws {
+    let root = try makeRoot()
+    let source = try makeSource(named: "local.txt", contents: "available locally")
+    let repository = ShelfRepository(configuration: configuration(root: root))
+    let outcome = await repository.importFiles([source], origin: .imported, expiresAt: nil)
+    let local = try XCTUnwrap(outcome.successes.first)
+    var remote = local
+    remote.title = "Remote rename"
+    remote.updatedAt = local.updatedAt.addingTimeInterval(1)
+    remote.revision = local.revision + 1
+    remote.modifiedByDeviceID = "remote-mac"
+    let metadataOnly = ShelfItem(
+      title: "Remote note",
+      kind: .text,
+      createdAt: now,
+      updatedAt: now,
+      text: "No asset required",
+      origin: .sync,
+      revision: 1,
+      modifiedByDeviceID: "remote-mac"
+    )
+
+    try await repository.applySyncRecords([
+      SyncRecord(item: remote, assetsByRelativePath: [:]),
+      SyncRecord(item: metadataOnly, assetsByRelativePath: [:])
+    ])
+
+    let snapshot = await repository.snapshot()
+    XCTAssertEqual(snapshot.first(where: { $0.id == local.id })?.title, "Remote rename")
+    XCTAssertEqual(snapshot.first(where: { $0.id == local.id })?.relativePath, local.relativePath)
+    XCTAssertEqual(snapshot.first(where: { $0.id == metadataOnly.id })?.text, "No asset required")
   }
 
   func testColdMutationLoadsExistingManifestBeforeCommit() async throws {
