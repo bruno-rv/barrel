@@ -187,6 +187,16 @@ final class EdgeShelfController {
     let display = geometry(for: screen)
     let insidePanel = panel?.frame.contains(point) == true
     let atEdge = layout.isActivationPoint(point, edge: edge, display: display)
+    let isActive = [.shown, .hidePending, .dragLocked].contains(machine.phase)
+
+    if isActive, screen.displayID != trackedDisplayID {
+      if machine.phase == .hidePending, atEdge {
+        apply(machine.handle(.explicitShow), point: point)
+        return
+      }
+      placePanel(shown: true, on: screen)
+      panel?.orderFrontRegardless()
+    }
 
     switch event.type {
     case .leftMouseDragged:
@@ -265,6 +275,10 @@ final class EdgeShelfController {
       trackedDisplayID = nil
       return
     }
+    placePanel(shown: shown, on: screen)
+  }
+
+  private func placePanel(shown: Bool, on screen: ShelfScreen) {
     trackedDisplayID = screen.displayID
     let frame = layout.targetFrame(shown: shown, edge: edge, display: geometry(for: screen))
     panel?.setFrame(frame, display: true, animate: false)

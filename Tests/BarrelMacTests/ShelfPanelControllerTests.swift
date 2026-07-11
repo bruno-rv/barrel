@@ -328,4 +328,95 @@ final class ShelfPanelControllerTests: XCTestCase {
     XCTAssertEqual(resolvedPoints, [NSPoint(x: 110, y: 50)])
     XCTAssertEqual(controller.trackedDisplayID, screenB.displayID)
   }
+
+  @MainActor
+  func testMovingFromHidePendingShelfToOtherDisplayEdgeShowsShelfThere() async throws {
+    let defaults = makeDefaults()
+    defaults.set(true, forKey: ShelfWindowPreferences.autoHideKey)
+    let panel = ShelfPanelController.makePanel(contentView: NSView())
+    let screenA = ShelfScreen(
+      displayID: 1,
+      frame: NSRect(x: 0, y: 0, width: 600, height: 700),
+      visibleFrame: NSRect(x: 0, y: 0, width: 600, height: 680),
+      isMain: true
+    )
+    let screenB = ShelfScreen(
+      displayID: 2,
+      frame: NSRect(x: 720, y: 0, width: 600, height: 700),
+      visibleFrame: NSRect(x: 720, y: 0, width: 600, height: 680),
+      isMain: false
+    )
+    var point = NSPoint(x: screenA.frame.midX, y: screenA.frame.midY)
+    let controller = EdgeShelfController(
+      panel: panel,
+      defaults: defaults,
+      mouseLocation: { point },
+      screens: { [screenA, screenB] }
+    )
+    controller.start()
+    defer { controller.stop() }
+    controller.showExplicitly()
+    let layout = ShelfPanelLayout()
+    let shownOnB = layout.targetFrame(
+      shown: true,
+      edge: .left,
+      display: ShelfDisplayGeometry(frame: screenB.frame, visibleFrame: screenB.visibleFrame)
+    )
+
+    point = NSPoint(x: screenA.frame.maxX - 1, y: screenA.frame.midY)
+    sendMouseMoved(to: point)
+    point = NSPoint(x: screenB.frame.minX + 1, y: screenB.frame.midY)
+    sendMouseMoved(to: point)
+
+    XCTAssertEqual(panel.frame, shownOnB)
+    XCTAssertTrue(panel.isVisible)
+    XCTAssertEqual(controller.trackedDisplayID, screenB.displayID)
+
+    try await Task.sleep(for: .milliseconds(300))
+
+    XCTAssertEqual(panel.frame, shownOnB)
+    XCTAssertTrue(panel.isVisible)
+  }
+
+  @MainActor
+  func testMovingDragLockedShelfToOtherDisplayRepositionsItShown() {
+    let defaults = makeDefaults()
+    defaults.set(true, forKey: ShelfWindowPreferences.autoHideKey)
+    let panel = ShelfPanelController.makePanel(contentView: NSView())
+    let screenA = ShelfScreen(
+      displayID: 1,
+      frame: NSRect(x: 0, y: 0, width: 600, height: 700),
+      visibleFrame: NSRect(x: 0, y: 0, width: 600, height: 680),
+      isMain: true
+    )
+    let screenB = ShelfScreen(
+      displayID: 2,
+      frame: NSRect(x: 720, y: 0, width: 600, height: 700),
+      visibleFrame: NSRect(x: 720, y: 0, width: 600, height: 680),
+      isMain: false
+    )
+    var point = NSPoint(x: screenA.frame.midX, y: screenA.frame.midY)
+    let controller = EdgeShelfController(
+      panel: panel,
+      defaults: defaults,
+      mouseLocation: { point },
+      screens: { [screenA, screenB] }
+    )
+    controller.start()
+    defer { controller.stop() }
+    controller.showExplicitly()
+    controller.setDropTargeted(true)
+
+    point = NSPoint(x: screenB.frame.midX, y: screenB.frame.midY)
+    sendMouseMoved(to: point)
+
+    let shownOnB = ShelfPanelLayout().targetFrame(
+      shown: true,
+      edge: .left,
+      display: ShelfDisplayGeometry(frame: screenB.frame, visibleFrame: screenB.visibleFrame)
+    )
+    XCTAssertEqual(panel.frame, shownOnB)
+    XCTAssertTrue(panel.isVisible)
+    XCTAssertEqual(controller.trackedDisplayID, screenB.displayID)
+  }
 }
