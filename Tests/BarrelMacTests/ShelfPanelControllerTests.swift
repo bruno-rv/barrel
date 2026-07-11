@@ -12,6 +12,22 @@ final class ShelfPanelControllerTests: XCTestCase {
   }
 
   @MainActor
+  private func sendMouseMoved(to point: NSPoint) {
+    let event = NSEvent.mouseEvent(
+      with: .mouseMoved,
+      location: point,
+      modifierFlags: [],
+      timestamp: ProcessInfo.processInfo.systemUptime,
+      windowNumber: 0,
+      context: nil,
+      eventNumber: 0,
+      clickCount: 0,
+      pressure: 0
+    )!
+    NSApplication.shared.sendEvent(event)
+  }
+
+  @MainActor
   func testPanelIsNonActivatingAndAvailableInFullScreenSpaces() {
     let panel = ShelfPanelController.makePanel(contentView: NSView())
 
@@ -100,5 +116,51 @@ final class ShelfPanelControllerTests: XCTestCase {
     try await Task.sleep(for: .milliseconds(300))
 
     XCTAssertEqual(panel.frame, shownFrame)
+  }
+
+  @MainActor
+  func testUnrelatedDefaultsChangeDoesNotStrandPendingReveal() async throws {
+    let defaults = makeDefaults()
+    defaults.set(true, forKey: ShelfWindowPreferences.autoHideKey)
+    let panel = ShelfPanelController.makePanel(contentView: NSView())
+    let controller = EdgeShelfController(panel: panel, defaults: defaults)
+    controller.start()
+    guard let screen = NSScreen.main else {
+      return XCTFail("Expected a main screen")
+    }
+    let originalLocation = NSEvent.mouseLocation
+    let edgePoint = NSPoint(x: screen.frame.minX + 1, y: screen.frame.midY)
+    CGWarpMouseCursorPosition(CGPoint(x: edgePoint.x, y: screen.frame.maxY - edgePoint.y))
+    defer {
+      CGWarpMouseCursorPosition(CGPoint(
+        x: originalLocation.x,
+        y: screen.frame.maxY - originalLocation.y
+      ))
+      controller.stop()
+    }
+    sendMouseMoved(to: edgePoint)
+    defaults.set(true, forKey: "UnrelatedShelfPreference")
+    controller.settingsDidChange()
+
+    try await Task.sleep(for: .milliseconds(150))
+
+    XCTAssertTrue(panel.frame.intersects(screen.frame))
+  }
+
+  @MainActor
+  func testEdgeOnlyChangeDoesNotStrandPendingHide() async throws {
+    let defaults = makeDefaults()
+    let panel = ShelfPanelController.makePanel(contentView: NSView())
+    let controller = EdgeShelfController(panel: panel, defaults: defaults)
+    controller.start()
+    defaults.set(true, forKey: ShelfWindowPreferences.autoHideKey)
+    controller.settingsDidChange()
+    defaults.set(ShelfEdge.right.rawValue, forKey: ShelfWindowPreferences.edgeKey)
+    controller.settingsDidChange()
+
+    try await Task.sleep(for: .milliseconds(300))
+
+    XCTAssertFalse(panel.frame.intersects(NSScreen.main!.frame))
+    controller.stop()
   }
 }

@@ -119,16 +119,20 @@ final class EdgeShelfController {
     let newEdge = Self.edge(in: defaults)
     let newAutoHide = defaults.bool(forKey: ShelfWindowPreferences.autoHideKey)
     let edgeChanged = newEdge != currentEdge
+    let autoHideChanged = newAutoHide != currentAutoHide
+    guard edgeChanged || autoHideChanged else { return }
     currentEdge = newEdge
     currentAutoHide = newAutoHide
-    cancelReveal()
-    cancelHide()
 
-    let point = NSEvent.mouseLocation
-    apply(machine.handle(.autoHideChanged(
-      isEnabled: newAutoHide,
-      pointerInside: panel?.frame.contains(point) == true
-    )), point: point)
+    if autoHideChanged {
+      cancelReveal()
+      cancelHide()
+      let point = NSEvent.mouseLocation
+      apply(machine.handle(.autoHideChanged(
+        isEnabled: newAutoHide,
+        pointerInside: panel?.frame.contains(point) == true
+      )), point: point)
+    }
     if edgeChanged { refreshPanelFrame() }
   }
 
