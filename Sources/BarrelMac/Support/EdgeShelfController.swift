@@ -13,6 +13,7 @@ final class EdgeShelfController {
   private var hideWorkItem: DispatchWorkItem?
   private var lifecycleGeneration = 0
   private var isRunning = false
+  private var isDropTargeted = false
   private var currentEdge: ShelfEdge
   private var currentAutoHide: Bool
 
@@ -101,6 +102,8 @@ final class EdgeShelfController {
     observers.removeAll()
     cancelReveal()
     cancelHide()
+    isDropTargeted = false
+    machine = EdgeShelfStateMachine()
   }
 
   func showExplicitly() {
@@ -108,11 +111,11 @@ final class EdgeShelfController {
   }
 
   func setDropTargeted(_ targeted: Bool) {
+    guard targeted != isDropTargeted else { return }
+    isDropTargeted = targeted
+    guard targeted else { return }
     let point = NSEvent.mouseLocation
-    let event: EdgeShelfEvent = targeted
-      ? .dragBegan
-      : .dragEnded(pointerInside: panel?.frame.contains(point) == true)
-    apply(machine.handle(event), point: point)
+    apply(machine.handle(.dragBegan), point: point)
   }
 
   func settingsDidChange() {
@@ -161,6 +164,7 @@ final class EdgeShelfController {
         apply(machine.handle(.dragBegan), point: point)
       }
     case .leftMouseUp:
+      isDropTargeted = false
       apply(machine.handle(.dragEnded(pointerInside: insidePanel)), point: point)
     default:
       apply(machine.handle(atEdge ? .edgeEntered : .edgeExited), point: point)

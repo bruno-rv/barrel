@@ -28,6 +28,22 @@ final class ShelfPanelControllerTests: XCTestCase {
   }
 
   @MainActor
+  private func sendLeftMouseUp(at point: NSPoint) {
+    let event = NSEvent.mouseEvent(
+      with: .leftMouseUp,
+      location: point,
+      modifierFlags: [],
+      timestamp: ProcessInfo.processInfo.systemUptime,
+      windowNumber: 0,
+      context: nil,
+      eventNumber: 0,
+      clickCount: 1,
+      pressure: 0
+    )!
+    NSApplication.shared.sendEvent(event)
+  }
+
+  @MainActor
   func testPanelIsNonActivatingAndAvailableInFullScreenSpaces() {
     let panel = ShelfPanelController.makePanel(contentView: NSView())
 
@@ -116,6 +132,73 @@ final class ShelfPanelControllerTests: XCTestCase {
     try await Task.sleep(for: .milliseconds(300))
 
     XCTAssertEqual(panel.frame, shownFrame)
+  }
+
+  @MainActor
+  func testDropTargetExitWaitsForMouseUpBeforeEndingDragLock() async throws {
+    let defaults = makeDefaults()
+    defaults.set(true, forKey: ShelfWindowPreferences.autoHideKey)
+    let panel = ShelfPanelController.makePanel(contentView: NSView())
+    let controller = EdgeShelfController(panel: panel, defaults: defaults)
+    controller.start()
+    guard let screen = NSScreen.main else {
+      return XCTFail("Expected a main screen")
+    }
+    let originalLocation = NSEvent.mouseLocation
+    let outsidePoint = NSPoint(x: screen.frame.midX, y: screen.frame.midY)
+    CGWarpMouseCursorPosition(CGPoint(
+      x: outsidePoint.x,
+      y: screen.frame.maxY - outsidePoint.y
+    ))
+    defer {
+      CGWarpMouseCursorPosition(CGPoint(
+        x: originalLocation.x,
+        y: screen.frame.maxY - originalLocation.y
+      ))
+      controller.stop()
+    }
+
+    controller.setDropTargeted(true)
+    controller.setDropTargeted(false)
+    try await Task.sleep(for: .milliseconds(300))
+
+    XCTAssertTrue(panel.frame.intersects(screen.frame))
+
+    sendLeftMouseUp(at: outsidePoint)
+    try await Task.sleep(for: .milliseconds(300))
+
+    XCTAssertFalse(panel.frame.intersects(screen.frame))
+  }
+
+  @MainActor
+  func testStoppingDuringDragClearsLockBeforeRestart() {
+    let defaults = makeDefaults()
+    defaults.set(true, forKey: ShelfWindowPreferences.autoHideKey)
+    let panel = ShelfPanelController.makePanel(contentView: NSView())
+    let controller = EdgeShelfController(panel: panel, defaults: defaults)
+    controller.start()
+    guard let screen = NSScreen.main else {
+      return XCTFail("Expected a main screen")
+    }
+    let originalLocation = NSEvent.mouseLocation
+    let outsidePoint = NSPoint(x: screen.frame.midX, y: screen.frame.midY)
+    CGWarpMouseCursorPosition(CGPoint(
+      x: outsidePoint.x,
+      y: screen.frame.maxY - outsidePoint.y
+    ))
+    defer {
+      CGWarpMouseCursorPosition(CGPoint(
+        x: originalLocation.x,
+        y: screen.frame.maxY - originalLocation.y
+      ))
+      controller.stop()
+    }
+
+    controller.setDropTargeted(true)
+    controller.stop()
+    controller.start()
+
+    XCTAssertFalse(panel.frame.intersects(screen.frame))
   }
 
   @MainActor
