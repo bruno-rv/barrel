@@ -14,9 +14,13 @@ final class ShelfPanelController {
   init(store: ShelfStore, defaults: UserDefaults = .standard) {
     let panel = Self.makePanel(contentView: NSView())
     let edgeController = EdgeShelfController(panel: panel, defaults: defaults)
-    panel.contentView = NSHostingView(rootView: ContentView(store: store))
     self.panel = panel
     self.edgeController = edgeController
+    panel.contentView = NSHostingView(
+      rootView: ContentView(store: store) { [weak self] targeted in
+        self?.setDropTargeted(targeted)
+      }
+    )
   }
 
   static func makePanel(contentView: NSView) -> ShelfPanel {

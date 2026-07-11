@@ -68,14 +68,22 @@ final class EdgeShelfModelTests: XCTestCase {
     XCTAssertEqual(machine.phase, .shown)
   }
 
-  func testExplicitShowCancelsPendingDelayedWork() {
-    var revealPending = EdgeShelfStateMachine(phase: .revealPending)
-    var hidePending = EdgeShelfStateMachine(phase: .hidePending)
+  func testExplicitShowCancelsPendingHideAndShowsPanel() {
+    var machine = EdgeShelfStateMachine(phase: .hidePending)
 
-    XCTAssertEqual(revealPending.handle(.explicitShow), [.cancelReveal, .show])
-    XCTAssertEqual(revealPending.phase, .shown)
-    XCTAssertEqual(hidePending.handle(.explicitShow), [.cancelHide, .show])
-    XCTAssertEqual(hidePending.phase, .shown)
+    XCTAssertEqual(machine.handle(.explicitShow), [.cancelHide, .show])
+    XCTAssertEqual(machine.phase, .shown)
+    XCTAssertEqual(machine.handle(.hideDelayElapsed), [])
+    XCTAssertEqual(machine.phase, .shown)
+    XCTAssertEqual(machine.handle(.pointerExitedPanel), [.scheduleHide])
+    XCTAssertEqual(machine.phase, .hidePending)
+  }
+
+  func testExplicitShowCancelsPendingRevealAndShowsPanel() {
+    var machine = EdgeShelfStateMachine(phase: .revealPending)
+
+    XCTAssertEqual(machine.handle(.explicitShow), [.cancelReveal, .show])
+    XCTAssertEqual(machine.phase, .shown)
   }
 
   func testDisablingAutoHideShowsPanelAndCancelsPendingWork() {
