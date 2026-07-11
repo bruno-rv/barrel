@@ -4,10 +4,17 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
   @ObservedObject var store: ShelfStore
+  let onDropTargetChange: (Bool) -> Void
   @AppStorage("CaptureClipboardHistory") private var captureClipboardHistory = false
-  @AppStorage("AutoHideShelf") private var autoHideShelf = true
-  @AppStorage("ShelfEdge") private var shelfEdge = "left"
   @State private var isDropTargeted = false
+
+  init(
+    store: ShelfStore,
+    onDropTargetChange: @escaping (Bool) -> Void = { _ in }
+  ) {
+    self.store = store
+    self.onDropTargetChange = onDropTargetChange
+  }
 
   var body: some View {
     ZStack {
@@ -31,7 +38,6 @@ struct ContentView: View {
         DropOverlay()
       }
     }
-    .background(WindowConfigurator(edge: shelfEdge, autoHide: autoHideShelf))
     .clipShape(RoundedRectangle(cornerRadius: 18))
     .onDrop(
       of: [UTType.fileURL.identifier, UTType.url.identifier, UTType.text.identifier, UTType.image.identifier],
@@ -39,6 +45,12 @@ struct ContentView: View {
     ) { providers in
       store.importProviders(providers)
       return true
+    }
+    .onChange(of: isDropTargeted) {
+      onDropTargetChange(isDropTargeted)
+    }
+    .onDisappear {
+      onDropTargetChange(false)
     }
     .onAppear {
       store.setClipboardCapture(enabled: captureClipboardHistory)
@@ -212,19 +224,9 @@ struct ContentView: View {
       }
 
       Spacer()
-
-      Text(statusText)
-        .font(.caption2.weight(.medium))
-        .foregroundStyle(.white.opacity(0.58))
     }
     .buttonStyle(.borderless)
     .foregroundStyle(.white)
-  }
-
-  private var statusText: String {
-    let edge = shelfEdge == "right" ? "Right" : "Left"
-    let hide = autoHideShelf ? "auto" : "pinned"
-    return "\(edge) edge · \(hide)"
   }
 
   private var errorBinding: Binding<Bool> {
@@ -395,5 +397,5 @@ private struct DropOverlay: View {
 
 #Preview {
   ContentView(store: .preview)
-    .frame(width: 310, height: 560)
+    .frame(width: 280, height: 480)
 }
