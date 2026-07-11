@@ -88,6 +88,76 @@ final class CloudKitSyncServiceTests: XCTestCase {
     XCTAssertEqual(error?.code, .serverRecordChanged)
   }
 
+  func testAllMissingFetchResultsAllowPushToCreateFreshRecords() async throws {
+    let item = makeItem(id: UUID(), title: "New")
+    let recordID = CKRecord.ID(recordName: item.id.uuidString, zoneID: zoneID)
+    let state = CloudFetchRecordsState(expectedRecordIDs: [recordID])
+    state.record(recordID: recordID, result: .failure(CKError(.unknownItem)))
+
+    let fetched = try state.resolvedRecords(
+      for: .failure(CKError(.unknownItem))
+    )
+    let store = RecordingCloudRecordStore(fetchedRecords: fetched)
+    let pusher = CloudKitRecordPusher(store: store, zoneID: zoneID)
+    try await pusher.push([SyncRecord(item: item)])
+
+    XCTAssertEqual(store.savedRecords.map(\.recordID), [recordID])
+    XCTAssertEqual(store.savedPolicy, .ifServerRecordUnchanged)
+  }
+
+  func testMixedExistingAndMissingFetchResultsReuseExistingAndCreateMissingRecord() async throws {
+    let existingItem = makeItem(id: UUID(), title: "Existing")
+    let newItem = makeItem(id: UUID(), title: "New")
+    let existingRecord = try makeRecord(item: existingItem)
+    let newRecordID = CKRecord.ID(recordName: newItem.id.uuidString, zoneID: zoneID)
+    let state = CloudFetchRecordsState(
+      expectedRecordIDs: [existingRecord.recordID, newRecordID]
+    )
+    state.record(recordID: existingRecord.recordID, result: .success(existingRecord))
+    state.record(recordID: newRecordID, result: .failure(CKError(.unknownItem)))
+
+    let fetched = try state.resolvedRecords(
+      for: .failure(CKError(.partialFailure))
+    )
+    let store = RecordingCloudRecordStore(fetchedRecords: fetched)
+    let pusher = CloudKitRecordPusher(store: store, zoneID: zoneID)
+    try await pusher.push([SyncRecord(item: existingItem), SyncRecord(item: newItem)])
+
+    XCTAssertEqual(Set(store.savedRecords.map(\.recordID)), [existingRecord.recordID, newRecordID])
+    XCTAssertTrue(store.savedRecords.first { $0.recordID == existingRecord.recordID } === existingRecord)
+  }
+
+  func testFetchAggregationStillPropagatesSeriousPerRecordAndOperationFailures() {
+    let recordID = CKRecord.ID(recordName: UUID().uuidString, zoneID: zoneID)
+    let perRecordFailure = CloudFetchRecordsState(expectedRecordIDs: [recordID])
+    perRecordFailure.record(
+      recordID: recordID,
+      result: .failure(CKError(.networkFailure))
+    )
+
+    XCTAssertThrowsError(
+      try perRecordFailure.resolvedRecords(for: .failure(CKError(.partialFailure)))
+    ) { error in
+      XCTAssertEqual((error as? CKError)?.code, .networkFailure)
+    }
+
+    let operationFailure = CloudFetchRecordsState(expectedRecordIDs: [recordID])
+    operationFailure.record(
+      recordID: recordID,
+      result: .failure(CKError(.unknownItem))
+    )
+    XCTAssertThrowsError(
+      try operationFailure.resolvedRecords(for: .failure(CKError(.notAuthenticated)))
+    ) { error in
+      XCTAssertEqual((error as? CKError)?.code, .notAuthenticated)
+    }
+    XCTAssertThrowsError(
+      try operationFailure.resolvedRecords(for: .failure(CKError(.operationCancelled)))
+    ) { error in
+      XCTAssertEqual((error as? CKError)?.code, .operationCancelled)
+    }
+  }
+
   private func makeItem(
     id: UUID,
     title: String,
@@ -181,6 +251,36 @@ private final class FakeCloudRecordStore: CloudRecordStore, @unchecked Sendable 
       copy[key] = record[key]
     }
     return copy
+  }
+}
+
+private final class RecordingCloudRecordStore: CloudRecordStore, @unchecked Sendable {
+  private let lock = NSLock()
+  private let fetchedRecords: [CKRecord.ID: CKRecord]
+  private var storedSavedRecords: [CKRecord] = []
+  private var storedSavedPolicy: CKModifyRecordsOperation.RecordSavePolicy?
+
+  init(fetchedRecords: [CKRecord.ID: CKRecord]) {
+    self.fetchedRecords = fetchedRecords
+  }
+
+  var savedRecords: [CKRecord] { lock.withLock { storedSavedRecords } }
+  var savedPolicy: CKModifyRecordsOperation.RecordSavePolicy? {
+    lock.withLock { storedSavedPolicy }
+  }
+
+  func fetchRecords(with recordIDs: [CKRecord.ID]) async throws -> [CKRecord.ID: CKRecord] {
+    fetchedRecords.filter { recordIDs.contains($0.key) }
+  }
+
+  func saveRecords(
+    _ records: [CKRecord],
+    savePolicy: CKModifyRecordsOperation.RecordSavePolicy
+  ) async throws {
+    lock.withLock {
+      storedSavedRecords = records
+      storedSavedPolicy = savePolicy
+    }
   }
 }
 

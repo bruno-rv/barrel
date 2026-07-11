@@ -215,20 +215,16 @@ private final class CloudKitRecordStore: CloudRecordStore, @unchecked Sendable {
     let cancellation = CloudOperationCancellation()
     return try await withTaskCancellationHandler {
       try await withCheckedThrowingContinuation { continuation in
-        let state = CloudFetchRecordsState()
+        let state = CloudFetchRecordsState(expectedRecordIDs: recordIDs)
         let operation = CKFetchRecordsOperation(recordIDs: recordIDs)
         operation.perRecordResultBlock = { recordID, result in
           state.record(recordID: recordID, result: result)
         }
         operation.fetchRecordsResultBlock = { result in
-          switch result {
-          case .failure(let error): continuation.resume(throwing: error)
-          case .success:
-            if let error = state.firstError {
-              continuation.resume(throwing: error)
-            } else {
-              continuation.resume(returning: state.records)
-            }
+          do {
+            continuation.resume(returning: try state.resolvedRecords(for: result))
+          } catch {
+            continuation.resume(throwing: error)
           }
         }
         cancellation.set(operation)
@@ -289,22 +285,48 @@ private final class CloudQueryState: @unchecked Sendable {
   func record(error: Error) { lock.withLock { if storedError == nil { storedError = error } } }
 }
 
-private final class CloudFetchRecordsState: @unchecked Sendable {
+final class CloudFetchRecordsState: @unchecked Sendable {
   private let lock = NSLock()
+  private let expectedRecordIDs: Set<CKRecord.ID>
   private var storedRecords: [CKRecord.ID: CKRecord] = [:]
+  private var completedRecordIDs: Set<CKRecord.ID> = []
+  private var missingRecordIDs: Set<CKRecord.ID> = []
   private var storedError: Error?
-  var records: [CKRecord.ID: CKRecord] { lock.withLock { storedRecords } }
-  var firstError: Error? { lock.withLock { storedError } }
+
+  init(expectedRecordIDs: [CKRecord.ID]) {
+    self.expectedRecordIDs = Set(expectedRecordIDs)
+  }
 
   func record(recordID: CKRecord.ID, result: Result<CKRecord, Error>) {
     lock.withLock {
+      completedRecordIDs.insert(recordID)
       switch result {
       case .success(let record):
         storedRecords[recordID] = record
       case .failure(let error as CKError) where error.code == .unknownItem:
-        break
+        missingRecordIDs.insert(recordID)
       case .failure(let error):
         if storedError == nil { storedError = error }
+      }
+    }
+  }
+
+  func resolvedRecords(
+    for operationResult: Result<Void, Error>
+  ) throws -> [CKRecord.ID: CKRecord] {
+    try lock.withLock {
+      if let storedError { throw storedError }
+      switch operationResult {
+      case .success:
+        return storedRecords
+      case .failure(let error):
+        guard let cloudError = error as? CKError,
+              cloudError.code == .unknownItem || cloudError.code == .partialFailure,
+              !missingRecordIDs.isEmpty,
+              completedRecordIDs.isSuperset(of: expectedRecordIDs) else {
+          throw error
+        }
+        return storedRecords
       }
     }
   }
