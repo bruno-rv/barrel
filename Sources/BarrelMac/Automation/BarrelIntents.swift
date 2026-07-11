@@ -75,7 +75,7 @@ struct HoldLinkIntent: AppIntent {
 
 struct ShowShelfIntent: AppIntent {
   static let title: LocalizedStringResource = "Show Barrel Shelf"
-  static let openAppWhenRun = true
+  static let openAppWhenRun = false
 
   func perform() async throws -> some IntentResult & ProvidesDialog {
     await MainActor.run {

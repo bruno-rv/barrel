@@ -3,6 +3,19 @@ import XCTest
 @testable import BarrelMac
 
 final class ShelfPanelControllerTests: XCTestCase {
+  private let screenA = ShelfScreen(
+    displayID: 1,
+    frame: NSRect(x: 0, y: 0, width: 100, height: 100),
+    visibleFrame: NSRect(x: 0, y: 0, width: 100, height: 90),
+    isMain: true
+  )
+  private let screenB = ShelfScreen(
+    displayID: 2,
+    frame: NSRect(x: 120, y: 0, width: 100, height: 100),
+    visibleFrame: NSRect(x: 120, y: 0, width: 100, height: 90),
+    isMain: false
+  )
+
   private func makeDefaults() -> UserDefaults {
     let defaults = UserDefaults(suiteName: "ShelfPanelControllerTests.\(UUID().uuidString)")!
     defaults.set(ShelfWindowPreferences.currentVersion, forKey: ShelfWindowPreferences.migrationKey)
@@ -245,5 +258,74 @@ final class ShelfPanelControllerTests: XCTestCase {
 
     XCTAssertFalse(panel.frame.intersects(NSScreen.main!.frame))
     controller.stop()
+  }
+
+  func testScreenResolverUsesPointerScreenBeforeTrackedScreen() {
+    let resolved = ShelfScreenResolver.resolve(
+      point: NSPoint(x: 150, y: 50),
+      trackedDisplayID: screenA.displayID,
+      screens: [screenA, screenB]
+    )
+
+    XCTAssertEqual(resolved?.displayID, screenB.displayID)
+  }
+
+  func testScreenResolverUsesTrackedScreenWhenPointerIsInGap() {
+    let resolved = ShelfScreenResolver.resolve(
+      point: NSPoint(x: 110, y: 50),
+      trackedDisplayID: screenB.displayID,
+      screens: [screenA, screenB]
+    )
+
+    XCTAssertEqual(resolved?.displayID, screenB.displayID)
+  }
+
+  func testScreenResolverUsesMainWhenTrackedScreenDisappears() {
+    let resolved = ShelfScreenResolver.resolve(
+      point: NSPoint(x: 110, y: 50),
+      trackedDisplayID: screenB.displayID,
+      screens: [screenA]
+    )
+
+    XCTAssertEqual(resolved?.displayID, screenA.displayID)
+  }
+
+  func testScreenResolverUsesFirstWhenThereIsNoMainScreen() {
+    let first = ShelfScreen(
+      displayID: 3,
+      frame: screenA.frame,
+      visibleFrame: screenA.visibleFrame,
+      isMain: false
+    )
+
+    let resolved = ShelfScreenResolver.resolve(
+      point: NSPoint(x: 110, y: 50),
+      trackedDisplayID: nil,
+      screens: [first, screenB]
+    )
+
+    XCTAssertEqual(resolved?.displayID, first.displayID)
+  }
+
+  @MainActor
+  func testExplicitRevealUsesResolverAndTracksResolvedDisplay() {
+    let defaults = makeDefaults()
+    let panel = ShelfPanelController.makePanel(contentView: NSView())
+    var resolvedPoints: [NSPoint] = []
+    let controller = EdgeShelfController(
+      panel: panel,
+      defaults: defaults,
+      mouseLocation: { NSPoint(x: 110, y: 50) },
+      screens: { [self.screenA, self.screenB] },
+      resolveScreen: { point, trackedDisplayID, screens in
+        resolvedPoints.append(point)
+        return screens.first(where: { $0.displayID == self.screenB.displayID })
+      }
+    )
+
+    controller.showExplicitly()
+
+    XCTAssertEqual(resolvedPoints, [NSPoint(x: 110, y: 50)])
+    XCTAssertEqual(controller.trackedDisplayID, screenB.displayID)
   }
 }

@@ -1,5 +1,25 @@
 import AppKit
 
+struct ShelfScreen: Equatable {
+  let displayID: CGDirectDisplayID
+  let frame: NSRect
+  let visibleFrame: NSRect
+  let isMain: Bool
+}
+
+enum ShelfScreenResolver {
+  static func resolve(
+    point: NSPoint,
+    trackedDisplayID: CGDirectDisplayID?,
+    screens: [ShelfScreen]
+  ) -> ShelfScreen? {
+    screens.first(where: { $0.frame.contains(point) })
+      ?? screens.first(where: { $0.displayID == trackedDisplayID })
+      ?? screens.first(where: \.isMain)
+      ?? screens.first
+  }
+}
+
 @MainActor
 final class EdgeShelfController {
   private weak var panel: NSPanel?
@@ -16,10 +36,24 @@ final class EdgeShelfController {
   private var isDropTargeted = false
   private var currentEdge: ShelfEdge
   private var currentAutoHide: Bool
+  private let mouseLocation: @MainActor () -> NSPoint
+  private let screens: @MainActor () -> [ShelfScreen]
+  private let resolveScreen: (NSPoint, CGDirectDisplayID?, [ShelfScreen]) -> ShelfScreen?
+  private(set) var trackedDisplayID: CGDirectDisplayID?
 
-  init(panel: NSPanel, defaults: UserDefaults) {
+  init(
+    panel: NSPanel,
+    defaults: UserDefaults,
+    mouseLocation: @escaping @MainActor () -> NSPoint = { NSEvent.mouseLocation },
+    screens: @escaping @MainActor () -> [ShelfScreen] = EdgeShelfController.availableScreens,
+    resolveScreen: @escaping (NSPoint, CGDirectDisplayID?, [ShelfScreen]) -> ShelfScreen? =
+      ShelfScreenResolver.resolve
+  ) {
     self.panel = panel
     self.defaults = defaults
+    self.mouseLocation = mouseLocation
+    self.screens = screens
+    self.resolveScreen = resolveScreen
     ShelfWindowPreferences.migrate(defaults)
     self.currentEdge = Self.edge(in: defaults)
     self.currentAutoHide = defaults.bool(forKey: ShelfWindowPreferences.autoHideKey)
@@ -79,7 +113,7 @@ final class EdgeShelfController {
     })
 
     refreshPanelFrame()
-    let point = NSEvent.mouseLocation
+    let point = mouseLocation()
     apply(machine.handle(.autoHideChanged(
       isEnabled: autoHideEnabled,
       pointerInside: panel?.frame.contains(point) == true
@@ -107,14 +141,14 @@ final class EdgeShelfController {
   }
 
   func showExplicitly() {
-    apply(machine.handle(.explicitShow), point: NSEvent.mouseLocation)
+    apply(machine.handle(.explicitShow), point: mouseLocation())
   }
 
   func setDropTargeted(_ targeted: Bool) {
     guard targeted != isDropTargeted else { return }
     isDropTargeted = targeted
     guard targeted else { return }
-    let point = NSEvent.mouseLocation
+    let point = mouseLocation()
     apply(machine.handle(.dragBegan), point: point)
   }
 
@@ -130,7 +164,7 @@ final class EdgeShelfController {
     if autoHideChanged {
       cancelReveal()
       cancelHide()
-      let point = NSEvent.mouseLocation
+      let point = mouseLocation()
       apply(machine.handle(.autoHideChanged(
         isEnabled: newAutoHide,
         pointerInside: panel?.frame.contains(point) == true
@@ -148,8 +182,8 @@ final class EdgeShelfController {
   }
 
   private func handle(_ event: NSEvent) {
-    let point = NSEvent.mouseLocation
-    guard let screen = screen(containing: point) else { return }
+    let point = mouseLocation()
+    guard let screen = resolvedScreen(containing: point) else { return }
     let display = geometry(for: screen)
     let insidePanel = panel?.frame.contains(point) == true
     let atEdge = layout.isActivationPoint(point, edge: edge, display: display)
@@ -185,7 +219,7 @@ final class EdgeShelfController {
           MainActor.assumeIsolated {
             guard let self, self.isCurrent(generation) else { return }
             self.revealWorkItem = nil
-            self.apply(self.machine.handle(.revealDelayElapsed), point: NSEvent.mouseLocation)
+            self.apply(self.machine.handle(.revealDelayElapsed), point: self.mouseLocation())
           }
         }
         revealWorkItem = item
@@ -205,7 +239,7 @@ final class EdgeShelfController {
           MainActor.assumeIsolated {
             guard let self, self.isCurrent(generation) else { return }
             self.hideWorkItem = nil
-            self.apply(self.machine.handle(.hideDelayElapsed), point: NSEvent.mouseLocation)
+            self.apply(self.machine.handle(.hideDelayElapsed), point: self.mouseLocation())
           }
         }
         hideWorkItem = item
@@ -222,22 +256,40 @@ final class EdgeShelfController {
 
   private func refreshPanelFrame() {
     let shown = [.shown, .hidePending, .dragLocked].contains(machine.phase)
-    setPanelFrame(shown: shown, point: NSEvent.mouseLocation)
+    setPanelFrame(shown: shown, point: mouseLocation())
     if shown { panel?.orderFrontRegardless() }
   }
 
   private func setPanelFrame(shown: Bool, point: NSPoint) {
-    guard let screen = screen(containing: point) else { return }
+    guard let screen = resolvedScreen(containing: point) else {
+      trackedDisplayID = nil
+      return
+    }
+    trackedDisplayID = screen.displayID
     let frame = layout.targetFrame(shown: shown, edge: edge, display: geometry(for: screen))
     panel?.setFrame(frame, display: true, animate: false)
   }
 
-  private func screen(containing point: NSPoint) -> NSScreen? {
-    NSScreen.screens.first(where: { $0.frame.contains(point) }) ?? NSScreen.main ?? NSScreen.screens.first
+  private func resolvedScreen(containing point: NSPoint) -> ShelfScreen? {
+    resolveScreen(point, trackedDisplayID, screens())
   }
 
-  private func geometry(for screen: NSScreen) -> ShelfDisplayGeometry {
+  private func geometry(for screen: ShelfScreen) -> ShelfDisplayGeometry {
     ShelfDisplayGeometry(frame: screen.frame, visibleFrame: screen.visibleFrame)
+  }
+
+  private static func availableScreens() -> [ShelfScreen] {
+    NSScreen.screens.compactMap { screen in
+      guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+        return nil
+      }
+      return ShelfScreen(
+        displayID: number.uint32Value,
+        frame: screen.frame,
+        visibleFrame: screen.visibleFrame,
+        isMain: screen == NSScreen.main
+      )
+    }
   }
 
   private func isCurrent(_ generation: Int) -> Bool {

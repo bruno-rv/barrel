@@ -6,8 +6,6 @@ struct ContentView: View {
   @ObservedObject var store: ShelfStore
   let onDropTargetChange: (Bool) -> Void
   @AppStorage("CaptureClipboardHistory") private var captureClipboardHistory = false
-  @AppStorage("AutoHideShelf") private var autoHideShelf = true
-  @AppStorage("ShelfEdge") private var shelfEdge = "left"
   @State private var isDropTargeted = false
 
   init(
@@ -226,19 +224,9 @@ struct ContentView: View {
       }
 
       Spacer()
-
-      Text(statusText)
-        .font(.caption2.weight(.medium))
-        .foregroundStyle(.white.opacity(0.58))
     }
     .buttonStyle(.borderless)
     .foregroundStyle(.white)
-  }
-
-  private var statusText: String {
-    let edge = shelfEdge == "right" ? "Right" : "Left"
-    let hide = autoHideShelf ? "auto" : "pinned"
-    return "\(edge) edge · \(hide)"
   }
 
   private var errorBinding: Binding<Bool> {
