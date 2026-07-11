@@ -65,6 +65,9 @@ struct EdgeShelfStateMachine {
     case (.shown, .dragBegan), (.hidePending, .dragBegan):
       phase = .dragLocked
       return [.cancelHide]
+    case (.hidden, .dragBegan):
+      phase = .dragLocked
+      return [.show]
     case (.revealPending, .dragBegan):
       phase = .dragLocked
       return [.cancelReveal, .show]

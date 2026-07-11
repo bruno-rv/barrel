@@ -3,6 +3,14 @@ import XCTest
 @testable import BarrelMac
 
 final class ShelfPanelControllerTests: XCTestCase {
+  private func makeDefaults() -> UserDefaults {
+    let defaults = UserDefaults(suiteName: "ShelfPanelControllerTests.\(UUID().uuidString)")!
+    defaults.set(ShelfWindowPreferences.currentVersion, forKey: ShelfWindowPreferences.migrationKey)
+    defaults.set(ShelfEdge.left.rawValue, forKey: ShelfWindowPreferences.edgeKey)
+    defaults.set(false, forKey: ShelfWindowPreferences.autoHideKey)
+    return defaults
+  }
+
   @MainActor
   func testPanelIsNonActivatingAndAvailableInFullScreenSpaces() {
     let panel = ShelfPanelController.makePanel(contentView: NSView())
@@ -24,5 +32,73 @@ final class ShelfPanelControllerTests: XCTestCase {
 
     XCTAssertTrue(panel.canBecomeKey)
     XCTAssertFalse(panel.canBecomeMain)
+  }
+
+  @MainActor
+  func testDisablingAutoHideCancelsPendingHide() async throws {
+    let defaults = makeDefaults()
+    let panel = ShelfPanelController.makePanel(contentView: NSView())
+    let controller = EdgeShelfController(panel: panel, defaults: defaults)
+    controller.start()
+    defaults.set(true, forKey: ShelfWindowPreferences.autoHideKey)
+    controller.settingsDidChange()
+    defaults.set(false, forKey: ShelfWindowPreferences.autoHideKey)
+    controller.settingsDidChange()
+
+    try await Task.sleep(for: .milliseconds(300))
+
+    XCTAssertTrue(panel.frame.intersects(NSScreen.main!.frame))
+    controller.stop()
+  }
+
+  @MainActor
+  func testChangingEdgeImmediatelyRecomputesShownFrame() {
+    let defaults = makeDefaults()
+    let panel = ShelfPanelController.makePanel(contentView: NSView())
+    let controller = EdgeShelfController(panel: panel, defaults: defaults)
+    controller.start()
+    let leftFrame = panel.frame
+
+    defaults.set(ShelfEdge.right.rawValue, forKey: ShelfWindowPreferences.edgeKey)
+    controller.settingsDidChange()
+
+    XCTAssertNotEqual(panel.frame.origin.x, leftFrame.origin.x)
+    XCTAssertEqual(panel.frame.maxX, NSScreen.main!.frame.maxX - 8)
+    controller.stop()
+  }
+
+  @MainActor
+  func testQueuedScreenCallbackDoesNotRepositionAfterStop() async {
+    let defaults = makeDefaults()
+    let panel = ShelfPanelController.makePanel(contentView: NSView())
+    let controller = EdgeShelfController(panel: panel, defaults: defaults)
+    controller.start()
+    let sentinel = NSRect(x: 41, y: 43, width: 280, height: 480)
+    panel.setFrame(sentinel, display: false)
+
+    NotificationCenter.default.post(
+      name: NSApplication.didChangeScreenParametersNotification,
+      object: nil
+    )
+    controller.stop()
+    await Task.yield()
+
+    XCTAssertEqual(panel.frame, sentinel)
+  }
+
+  @MainActor
+  func testStoppedControllerCancelsPendingHide() async throws {
+    let defaults = makeDefaults()
+    let panel = ShelfPanelController.makePanel(contentView: NSView())
+    let controller = EdgeShelfController(panel: panel, defaults: defaults)
+    controller.start()
+    defaults.set(true, forKey: ShelfWindowPreferences.autoHideKey)
+    controller.settingsDidChange()
+    let shownFrame = panel.frame
+
+    controller.stop()
+    try await Task.sleep(for: .milliseconds(300))
+
+    XCTAssertEqual(panel.frame, shownFrame)
   }
 }

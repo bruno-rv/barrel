@@ -54,6 +54,13 @@ final class EdgeShelfModelTests: XCTestCase {
     XCTAssertEqual(machine.handle(.hideDelayElapsed), [.hide])
   }
 
+  func testDragBeginningFromHiddenShowsAndLocksShelf() {
+    var machine = EdgeShelfStateMachine()
+
+    XCTAssertEqual(machine.handle(.dragBegan), [.show])
+    XCTAssertEqual(machine.phase, .dragLocked)
+  }
+
   func testMouseUpInsideUnlocksDragWithoutSchedulingHide() {
     var machine = EdgeShelfStateMachine(phase: .dragLocked)
 

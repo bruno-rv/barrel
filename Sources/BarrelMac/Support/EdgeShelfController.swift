@@ -11,25 +11,36 @@ final class EdgeShelfController {
   private var observers: [NSObjectProtocol] = []
   private var revealWorkItem: DispatchWorkItem?
   private var hideWorkItem: DispatchWorkItem?
+  private var lifecycleGeneration = 0
+  private var isRunning = false
+  private var currentEdge: ShelfEdge
+  private var currentAutoHide: Bool
 
   init(panel: NSPanel, defaults: UserDefaults) {
     self.panel = panel
     self.defaults = defaults
     ShelfWindowPreferences.migrate(defaults)
+    self.currentEdge = Self.edge(in: defaults)
+    self.currentAutoHide = defaults.bool(forKey: ShelfWindowPreferences.autoHideKey)
   }
 
   func start() {
     guard localMonitor == nil, globalMonitor == nil else { return }
+    lifecycleGeneration &+= 1
+    let generation = lifecycleGeneration
+    isRunning = true
 
     let mask: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDragged, .leftMouseUp]
     localMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
       MainActor.assumeIsolated {
+        guard self?.isCurrent(generation) == true else { return }
         self?.handle(event)
       }
       return event
     }
     globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
       Task { @MainActor in
+        guard self?.isCurrent(generation) == true else { return }
         self?.handle(event)
       }
     }
@@ -40,14 +51,30 @@ final class EdgeShelfController {
       object: nil,
       queue: .main
     ) { [weak self] _ in
-      Task { @MainActor in self?.refreshPanelFrame() }
+      Task { @MainActor in
+        guard self?.isCurrent(generation) == true else { return }
+        self?.refreshPanelFrame()
+      }
     })
     observers.append(NSWorkspace.shared.notificationCenter.addObserver(
       forName: NSWorkspace.activeSpaceDidChangeNotification,
       object: nil,
       queue: .main
     ) { [weak self] _ in
-      Task { @MainActor in self?.refreshPanelFrame() }
+      Task { @MainActor in
+        guard self?.isCurrent(generation) == true else { return }
+        self?.refreshPanelFrame()
+      }
+    })
+    observers.append(center.addObserver(
+      forName: UserDefaults.didChangeNotification,
+      object: defaults,
+      queue: .main
+    ) { [weak self] _ in
+      Task { @MainActor in
+        guard self?.isCurrent(generation) == true else { return }
+        self?.settingsDidChange()
+      }
     })
 
     refreshPanelFrame()
@@ -59,6 +86,8 @@ final class EdgeShelfController {
   }
 
   func stop() {
+    isRunning = false
+    lifecycleGeneration &+= 1
     if let localMonitor {
       NSEvent.removeMonitor(localMonitor)
       self.localMonitor = nil
@@ -86,12 +115,29 @@ final class EdgeShelfController {
     apply(machine.handle(event), point: point)
   }
 
+  func settingsDidChange() {
+    let newEdge = Self.edge(in: defaults)
+    let newAutoHide = defaults.bool(forKey: ShelfWindowPreferences.autoHideKey)
+    let edgeChanged = newEdge != currentEdge
+    currentEdge = newEdge
+    currentAutoHide = newAutoHide
+    cancelReveal()
+    cancelHide()
+
+    let point = NSEvent.mouseLocation
+    apply(machine.handle(.autoHideChanged(
+      isEnabled: newAutoHide,
+      pointerInside: panel?.frame.contains(point) == true
+    )), point: point)
+    if edgeChanged { refreshPanelFrame() }
+  }
+
   private var edge: ShelfEdge {
-    ShelfEdge(rawValue: defaults.string(forKey: ShelfWindowPreferences.edgeKey) ?? "") ?? .left
+    currentEdge
   }
 
   private var autoHideEnabled: Bool {
-    defaults.bool(forKey: ShelfWindowPreferences.autoHideKey)
+    currentAutoHide
   }
 
   private func handle(_ event: NSEvent) {
@@ -105,6 +151,9 @@ final class EdgeShelfController {
     case .leftMouseDragged:
       let alreadyShown = [.shown, .hidePending, .dragLocked].contains(machine.phase)
       if alreadyShown || insidePanel || atEdge {
+        if machine.phase == .hidden && atEdge {
+          apply(machine.handle(.edgeEntered), point: point)
+        }
         apply(machine.handle(.dragBegan), point: point)
       }
     case .leftMouseUp:
@@ -123,9 +172,10 @@ final class EdgeShelfController {
       case .scheduleReveal:
         cancelHide()
         cancelReveal()
+        let generation = lifecycleGeneration
         let item = DispatchWorkItem { [weak self] in
           MainActor.assumeIsolated {
-            guard let self else { return }
+            guard let self, self.isCurrent(generation) else { return }
             self.revealWorkItem = nil
             self.apply(self.machine.handle(.revealDelayElapsed), point: NSEvent.mouseLocation)
           }
@@ -142,9 +192,10 @@ final class EdgeShelfController {
       case .scheduleHide:
         cancelReveal()
         cancelHide()
+        let generation = lifecycleGeneration
         let item = DispatchWorkItem { [weak self] in
           MainActor.assumeIsolated {
-            guard let self else { return }
+            guard let self, self.isCurrent(generation) else { return }
             self.hideWorkItem = nil
             self.apply(self.machine.handle(.hideDelayElapsed), point: NSEvent.mouseLocation)
           }
@@ -179,6 +230,14 @@ final class EdgeShelfController {
 
   private func geometry(for screen: NSScreen) -> ShelfDisplayGeometry {
     ShelfDisplayGeometry(frame: screen.frame, visibleFrame: screen.visibleFrame)
+  }
+
+  private func isCurrent(_ generation: Int) -> Bool {
+    isRunning && lifecycleGeneration == generation
+  }
+
+  private static func edge(in defaults: UserDefaults) -> ShelfEdge {
+    ShelfEdge(rawValue: defaults.string(forKey: ShelfWindowPreferences.edgeKey) ?? "") ?? .left
   }
 
   private func cancelReveal() {
