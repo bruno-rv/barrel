@@ -61,10 +61,11 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
     if filter == .trash { filter = .all }
   }
 
-  func openHistory() {
+  func openHistory() async {
     selectedIDs = []
     selectedItemID = nil
     viewMode = .history
+    await refresh()
   }
 
   func openTrash() {

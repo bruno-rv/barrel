@@ -6,6 +6,7 @@ public actor ShelfRepository {
   private let fileManager: FileManager
   private var items: [ShelfItem] = []
   private var exportedItemIDs: Set<UUID> = []
+  private var localItemSnapshots: [UUID: ShelfItem] = [:]
   private var history: [HistoryEvent] = []
   private var quotaBytes: Int64
   private var isLoaded = false
@@ -35,6 +36,7 @@ public actor ShelfRepository {
     guard fileManager.fileExists(atPath: manifestURL.path) else {
       items = []
       exportedItemIDs = []
+      localItemSnapshots = [:]
       history = []
       try clearStaging()
       try removeOrphans()
@@ -53,6 +55,7 @@ public actor ShelfRepository {
         decoded = RepositoryManifest(
           items: try decoder.decode([ShelfItem].self, from: data),
           exportedItemIDs: [],
+          localItemSnapshots: [:],
           history: []
         )
       }
@@ -68,11 +71,18 @@ public actor ShelfRepository {
     let pruned = prunedState(
       items: decoded.items,
       exportedItemIDs: decoded.exportedItemIDs,
+      localItemSnapshots: decoded.localItemSnapshots,
       history: decoded.history
     )
-    try save(pruned.items, exportedItemIDs: pruned.exportedItemIDs, history: pruned.history)
+    try save(
+      pruned.items,
+      exportedItemIDs: pruned.exportedItemIDs,
+      localItemSnapshots: pruned.localItemSnapshots,
+      history: pruned.history
+    )
     items = pruned.items
     exportedItemIDs = pruned.exportedItemIDs
+    localItemSnapshots = pruned.localItemSnapshots
     history = pruned.history
     try clearStaging()
     try removeOrphans()
@@ -87,12 +97,15 @@ public actor ShelfRepository {
   public func temporarySnapshot() throws -> [ShelfItem] {
     try ensureLoaded()
     try pruneHistory()
-    return items.filter {
+    let canonical = items.filter {
       !exportedItemIDs.contains($0.id)
+        && localItemSnapshots[$0.id] == nil
         && $0.trashedAt == nil
         && $0.deletedAt == nil
         && $0.relativePath != nil
     }
+    let restored = localItemSnapshots.values.filter { !exportedItemIDs.contains($0.id) }
+    return canonical + restored
   }
 
   public func historySnapshot() throws -> [HistoryEvent] {
@@ -181,12 +194,24 @@ public actor ShelfRepository {
         reversedByEventID: nil
       )
       let updatedExportedIDs = exportedItemIDs.union([itemID])
-      let pruned = prunedState(items: items, exportedItemIDs: updatedExportedIDs, history: history + [event])
+      let updatedSnapshots = localItemSnapshots.merging([itemID: item]) { _, exported in exported }
+      let pruned = prunedState(
+        items: items,
+        exportedItemIDs: updatedExportedIDs,
+        localItemSnapshots: updatedSnapshots,
+        history: history + [event]
+      )
       let retainedItemIDs = Set(pruned.items.map(\.id))
       removed = items.filter { !retainedItemIDs.contains($0.id) }
-      try save(pruned.items, exportedItemIDs: pruned.exportedItemIDs, history: pruned.history)
+      try save(
+        pruned.items,
+        exportedItemIDs: pruned.exportedItemIDs,
+        localItemSnapshots: pruned.localItemSnapshots,
+        history: pruned.history
+      )
       items = pruned.items
       exportedItemIDs = pruned.exportedItemIDs
+      localItemSnapshots = pruned.localItemSnapshots
       history = pruned.history
     } catch {
       try? fileManager.removeItem(at: destinationURL)
@@ -273,11 +298,21 @@ public actor ShelfRepository {
     candidateHistory[eventIndex].reversedByEventID = undoEvent.id
     candidateHistory.append(undoEvent)
     let candidateExportedIDs = exportedItemIDs.subtracting([exportEvent.itemID])
-    let pruned = prunedState(items: items, exportedItemIDs: candidateExportedIDs, history: candidateHistory)
+    let pruned = prunedState(
+      items: items,
+      exportedItemIDs: candidateExportedIDs,
+      localItemSnapshots: localItemSnapshots,
+      history: candidateHistory
+    )
     let retainedItemIDs = Set(pruned.items.map(\.id))
     let removed = items.filter { !retainedItemIDs.contains($0.id) }
     do {
-      try save(pruned.items, exportedItemIDs: pruned.exportedItemIDs, history: pruned.history)
+      try save(
+        pruned.items,
+        exportedItemIDs: pruned.exportedItemIDs,
+        localItemSnapshots: pruned.localItemSnapshots,
+        history: pruned.history
+      )
     } catch {
       do {
         try fileManager.moveItem(at: stagingURL, to: destinationURL)
@@ -288,6 +323,7 @@ public actor ShelfRepository {
     }
     items = pruned.items
     exportedItemIDs = pruned.exportedItemIDs
+    localItemSnapshots = pruned.localItemSnapshots
     history = pruned.history
     do {
       try fileManager.removeItem(at: stagingURL)
@@ -503,7 +539,7 @@ public actor ShelfRepository {
     let sizes = physicalBytesByItemID(updated, now: now)
     let candidates = Set(
       RetentionPolicy().cleanupCandidates(
-        items: updated,
+        items: updated.filter { localItemSnapshots[$0.id] == nil },
         now: now,
         bytesByItemID: sizes,
         quotaBytes: quotaBytes
@@ -622,7 +658,7 @@ public actor ShelfRepository {
   }
 
   private func makeSyncRecords(from source: [ShelfItem]) -> [SyncRecord] {
-    source.map { item in
+    source.filter { localItemSnapshots[$0.id] == nil }.map { item in
       var assets: [String: URL] = [:]
       for nested in flattened([item]) {
         if let path = nested.relativePath,
@@ -711,6 +747,7 @@ public actor ShelfRepository {
   private func save(
     _ items: [ShelfItem],
     exportedItemIDs: Set<UUID>? = nil,
+    localItemSnapshots: [UUID: ShelfItem]? = nil,
     history: [HistoryEvent]? = nil
   ) throws {
     let encoder = JSONEncoder()
@@ -718,6 +755,7 @@ public actor ShelfRepository {
     let manifest = RepositoryManifest(
       items: items,
       exportedItemIDs: exportedItemIDs ?? self.exportedItemIDs,
+      localItemSnapshots: localItemSnapshots ?? self.localItemSnapshots,
       history: history ?? self.history
     )
     let data = try encoder.encode(manifest)
@@ -725,15 +763,27 @@ public actor ShelfRepository {
   }
 
   private func pruneHistory() throws {
-    let pruned = prunedState(items: items, exportedItemIDs: exportedItemIDs, history: history)
+    let pruned = prunedState(
+      items: items,
+      exportedItemIDs: exportedItemIDs,
+      localItemSnapshots: localItemSnapshots,
+      history: history
+    )
     guard pruned.items != items
       || pruned.exportedItemIDs != exportedItemIDs
+      || pruned.localItemSnapshots != localItemSnapshots
       || pruned.history != history else { return }
     let retainedItemIDs = Set(pruned.items.map(\.id))
     let removed = items.filter { !retainedItemIDs.contains($0.id) }
-    try save(pruned.items, exportedItemIDs: pruned.exportedItemIDs, history: pruned.history)
+    try save(
+      pruned.items,
+      exportedItemIDs: pruned.exportedItemIDs,
+      localItemSnapshots: pruned.localItemSnapshots,
+      history: pruned.history
+    )
     items = pruned.items
     exportedItemIDs = pruned.exportedItemIDs
+    localItemSnapshots = pruned.localItemSnapshots
     history = pruned.history
     try deleteUnreferencedFiles(from: removed, remainingItems: items)
   }
@@ -741,6 +791,7 @@ public actor ShelfRepository {
   private func prunedState(
     items: [ShelfItem],
     exportedItemIDs: Set<UUID>,
+    localItemSnapshots: [UUID: ShelfItem],
     history: [HistoryEvent]
   ) -> RepositoryManifest {
     let now = configuration.now()
@@ -749,9 +800,14 @@ public actor ShelfRepository {
     }
     let retainedHistoryItemIDs = Set(retainedHistory.map(\.itemID))
     let expiredExportedItemIDs = exportedItemIDs.subtracting(retainedHistoryItemIDs)
+    let expiredSnapshotItemIDs = Set(localItemSnapshots.keys).subtracting(retainedHistoryItemIDs)
+    let retainedSnapshots = localItemSnapshots.filter { retainedHistoryItemIDs.contains($0.key) }
     return RepositoryManifest(
-      items: items.filter { !expiredExportedItemIDs.contains($0.id) },
+      items: items.filter {
+        !expiredExportedItemIDs.contains($0.id) && !expiredSnapshotItemIDs.contains($0.id)
+      },
       exportedItemIDs: exportedItemIDs.subtracting(expiredExportedItemIDs),
+      localItemSnapshots: retainedSnapshots,
       history: retainedHistory
     )
   }
@@ -930,7 +986,7 @@ public actor ShelfRepository {
   }
 
   private func removeOrphans() throws {
-    let references = Set(flattened(items).compactMap(\.relativePath))
+    let references = Set(flattened(items + Array(localItemSnapshots.values)).compactMap(\.relativePath))
     for url in try fileManager.contentsOfDirectory(at: itemsDirectory, includingPropertiesForKeys: nil) {
       let relativeDirectory = "Items/\(url.lastPathComponent)"
       let isReferenced = references.contains { reference in
@@ -946,7 +1002,9 @@ public actor ShelfRepository {
     from removedItems: [ShelfItem],
     remainingItems: [ShelfItem]
   ) throws {
-    let remainingPaths = Set(flattened(remainingItems).compactMap(\.relativePath))
+    let remainingPaths = Set(
+      flattened(remainingItems + Array(localItemSnapshots.values)).compactMap(\.relativePath)
+    )
     let removedPaths = Set(flattened(removedItems).compactMap(\.relativePath))
     for path in removedPaths where !remainingPaths.contains(path) {
       guard let url = managedURL(for: path) else { continue }
@@ -1038,5 +1096,37 @@ private enum StagingResult: Sendable {
 private struct RepositoryManifest: Codable {
   var items: [ShelfItem]
   var exportedItemIDs: Set<UUID>
+  var localItemSnapshots: [UUID: ShelfItem]
   var history: [HistoryEvent]
+
+  private enum CodingKeys: String, CodingKey {
+    case items, exportedItemIDs, localItemSnapshots, history
+  }
+
+  init(
+    items: [ShelfItem],
+    exportedItemIDs: Set<UUID>,
+    localItemSnapshots: [UUID: ShelfItem],
+    history: [HistoryEvent]
+  ) {
+    self.items = items
+    self.exportedItemIDs = exportedItemIDs
+    self.localItemSnapshots = localItemSnapshots
+    self.history = history
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    let decodedItems = try container.decode([ShelfItem].self, forKey: .items)
+    let decodedExportedItemIDs = try container.decode(Set<UUID>.self, forKey: .exportedItemIDs)
+    items = decodedItems
+    exportedItemIDs = decodedExportedItemIDs
+    localItemSnapshots = try container.decodeIfPresent([UUID: ShelfItem].self, forKey: .localItemSnapshots)
+      ?? Dictionary(
+        uniqueKeysWithValues: decodedItems
+          .filter { decodedExportedItemIDs.contains($0.id) }
+          .map { ($0.id, $0) }
+      )
+    history = try container.decode([HistoryEvent].self, forKey: .history)
+  }
 }

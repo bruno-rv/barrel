@@ -114,6 +114,27 @@ final class FilePromiseDragSourceTests: XCTestCase {
     XCTAssertEqual(exporter.calls.count, 0)
   }
 
+  func testAcceptedSessionWithoutWriteReleasesDelegateAtLifecycleTeardown() {
+    let exporter = FakeExporter()
+    var lifecycle: FilePromiseDragLifecycle? = FilePromiseDragLifecycle()
+    var delegate: ShelfFilePromiseDelegate? = ShelfFilePromiseDelegate(
+      itemID: UUID(),
+      fileName: "asset.bin",
+      exporter: exporter,
+      lifecycle: lifecycle
+    )
+    weak let weakDelegate = delegate
+    lifecycle!.begin(delegate: delegate!)
+    lifecycle!.draggingSessionEnded(sessionID: delegate!.lifecycleID, operation: .copy)
+    delegate = nil
+
+    XCTAssertNotNil(weakDelegate)
+    lifecycle = nil
+
+    XCTAssertNil(weakDelegate)
+    XCTAssertEqual(exporter.calls.count, 0)
+  }
+
   func testAcceptedWriteRetainsDelegateAfterSessionEndsUntilExportCompletes() async {
     let exporter = FakeExporter(suspends: true)
     let lifecycle = FilePromiseDragLifecycle()

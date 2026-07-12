@@ -10,6 +10,9 @@ protocol ShelfFilePromiseExporting: AnyObject {
 
 @MainActor
 final class FilePromiseDragLifecycle {
+  // An accepted Finder drag may never call writePromiseTo. There is no safe
+  // timeout: Finder can begin a valid promise write after an arbitrary delay.
+  // The lifecycle/coordinator's deinit is the terminal release for that case.
   private struct SessionState {
     var delegate: ShelfFilePromiseDelegate?
     var writeInProgress = false
@@ -48,7 +51,7 @@ final class ShelfFilePromiseDelegate: NSObject, NSFilePromiseProviderDelegate {
   private let itemID: UUID
   private let fileName: String
   private let exporter: any ShelfFilePromiseExporting
-  private let lifecycle: FilePromiseDragLifecycle?
+  private weak var lifecycle: FilePromiseDragLifecycle?
 
   @MainActor
   init(

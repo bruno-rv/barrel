@@ -77,7 +77,7 @@ struct SidebarView: View {
     VStack(spacing: 8) {
       HStack {
         Button("Bucket") { store.openBucket() }
-        Button("History") { store.openHistory() }
+        Button("History") { Task { await store.openHistory() } }
         Button("Trash") { store.openTrash() }
       }
       .buttonStyle(.borderless)

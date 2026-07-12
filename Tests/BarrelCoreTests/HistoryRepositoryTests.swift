@@ -3,7 +3,7 @@ import XCTest
 @testable import BarrelCore
 
 final class HistoryRepositoryTests: XCTestCase {
-  func testExportPreservesExactNamePersistsLocalStateAndPreservesSyncRecords() async throws {
+  func testExportPreservesExactNamePersistsLocalStateAndRemovesItemFromSync() async throws {
     let fixture = try ExportFixture(fileName: "report.pdf", contents: "report bytes")
     defer { fixture.remove() }
     let before = try await fixture.repository.syncRecords()
@@ -21,12 +21,85 @@ final class HistoryRepositoryTests: XCTestCase {
     let temporary = try await fixture.repository.temporarySnapshot()
     let after = try await fixture.repository.syncRecords()
     XCTAssertEqual(temporary, [])
-    XCTAssertEqual(after, before)
+    XCTAssertEqual(before.map(\.item.id), [fixture.item.id])
+    XCTAssertTrue(after.isEmpty)
     let reloaded = ShelfRepository(configuration: fixture.configuration)
     let reloadedTemporary = try await reloaded.temporarySnapshot()
     let reloadedHistory = try await reloaded.historySnapshot()
     XCTAssertEqual(reloadedTemporary, [])
     XCTAssertEqual(reloadedHistory.map(\.id), [event.id])
+  }
+
+  func testRemoteTombstoneDuringExportDoesNotPreventColdReloadUndo() async throws {
+    let fixture = try ExportFixture(fileName: "report.pdf", contents: "report bytes")
+    defer { fixture.remove() }
+    let export = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
+    var tombstone = fixture.item
+    tombstone.title = "Deleted Item"
+    tombstone.fileName = nil
+    tombstone.relativePath = nil
+    tombstone.contentHash = nil
+    tombstone.deletedAt = export.timestamp.addingTimeInterval(1)
+    tombstone.updatedAt = tombstone.deletedAt!
+    tombstone.revision += 1
+
+    try await fixture.repository.applySyncRecords([SyncRecord(item: tombstone)])
+    let syncAfterTombstone = try await fixture.repository.syncRecords()
+    XCTAssertTrue(syncAfterTombstone.isEmpty)
+
+    let reloaded = ShelfRepository(configuration: fixture.configuration)
+    _ = try await reloaded.undo(historyEventID: export.id)
+
+    let restoredTemporary = try await reloaded.temporarySnapshot()
+    let restoredSync = try await reloaded.syncRecords()
+    XCTAssertEqual(restoredTemporary.map(\.id), [fixture.item.id])
+    XCTAssertTrue(restoredSync.isEmpty)
+    let restored = try XCTUnwrap(restoredTemporary.first)
+    let fileURL = await reloaded.fileURL(for: restored)
+    let restoredURL = try XCTUnwrap(fileURL)
+    XCTAssertEqual(try Data(contentsOf: restoredURL), Data("report bytes".utf8))
+  }
+
+  func testCleanupCountsExportedBytesButDoesNotTrashRetainedExport() async throws {
+    let clock = TestHistoryClock(Date(timeIntervalSince1970: 1_800_000_000))
+    let fixture = try ExportFixture(
+      fileName: "quota.txt",
+      contents: "123456",
+      configuration: { root in
+        RepositoryConfiguration(rootURL: root, deviceID: "test-mac", quotaBytes: 0, now: { clock.now })
+      }
+    )
+    defer { fixture.remove() }
+    let export = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
+
+    let outcome = try await fixture.repository.cleanup()
+
+    XCTAssertEqual(outcome.physicalUsageBytes, 6)
+    XCTAssertTrue(outcome.requiresManualCleanup)
+    _ = try await fixture.repository.undo(historyEventID: export.id)
+    let temporary = try await fixture.repository.temporarySnapshot()
+    XCTAssertEqual(temporary.map(\.id), [fixture.item.id])
+  }
+
+  func testUndoSnapshotBytesAreDeletedWhenHistoryExpires() async throws {
+    let clock = TestHistoryClock(Date(timeIntervalSince1970: 1_800_000_000))
+    let fixture = try ExportFixture(
+      fileName: "expiry.txt",
+      contents: "bytes",
+      configuration: { root in
+        RepositoryConfiguration(rootURL: root, deviceID: "test-mac", now: { clock.now })
+      }
+    )
+    defer { fixture.remove() }
+    let resolvedManagedURL = await fixture.repository.fileURL(for: fixture.item)
+    let managedURL = try XCTUnwrap(resolvedManagedURL)
+    let export = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
+    _ = try await fixture.repository.undo(historyEventID: export.id)
+
+    clock.now.addTimeInterval(86_400)
+    _ = try await fixture.repository.historySnapshot()
+
+    XCTAssertFalse(FileManager.default.fileExists(atPath: managedURL.path))
   }
 
   func testExportFailsWithoutOverwritingOrSuffixingWhenPromisedNameExists() async throws {
@@ -564,7 +637,8 @@ private struct ExportFixture {
     fileName: String,
     contents: String,
     manifestWriter: @escaping ManifestWriter = RepositoryConfiguration.defaultManifestWriter,
-    fileManager: FileManager = .default
+    fileManager: FileManager = .default,
+    configuration makeConfiguration: ((URL) -> RepositoryConfiguration)? = nil
   ) throws {
     let manager = FileManager.default
     root = manager.temporaryDirectory.appendingPathComponent("HistoryRepositoryTests-\(UUID())", isDirectory: true)
@@ -574,7 +648,8 @@ private struct ExportFixture {
     let source = manager.temporaryDirectory.appendingPathComponent("HistorySource-\(UUID())", isDirectory: true)
     try manager.createDirectory(at: source, withIntermediateDirectories: true)
     try Data(contents.utf8).write(to: source.appendingPathComponent(fileName))
-    configuration = RepositoryConfiguration(rootURL: root, deviceID: "test-mac", manifestWriter: manifestWriter)
+    configuration = makeConfiguration?(root)
+      ?? RepositoryConfiguration(rootURL: root, deviceID: "test-mac", manifestWriter: manifestWriter)
     repository = ShelfRepository(configuration: configuration, fileManager: fileManager)
     let outcome = try blockingImport(repository: repository, source: source.appendingPathComponent(fileName))
     item = try XCTUnwrap(outcome.successes.first)

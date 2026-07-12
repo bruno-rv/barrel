@@ -116,7 +116,9 @@ struct ContentView: View {
     VStack(spacing: 8) {
       HStack(spacing: 6) {
         modeButton("Bucket", image: "tray.full", mode: .bucket, action: store.openBucket)
-        modeButton("History", image: "clock.arrow.circlepath", mode: .history, action: store.openHistory)
+        modeButton("History", image: "clock.arrow.circlepath", mode: .history) {
+          Task { await store.openHistory() }
+        }
         modeButton("Trash", image: "trash", mode: .trash, action: store.openTrash)
       }
 

@@ -21,14 +21,28 @@ final class ShelfStoreHistoryTests: XCTestCase {
     XCTAssertTrue(store.visibleItems.isEmpty)
   }
 
-  func testOpenHistoryChangesViewMode() throws {
+  func testOpenHistoryRefreshesBeforeReturningAtRetentionBoundary() async throws {
+    let fixture = try await Fixture()
+    _ = try await fixture.export(fileName: "Expired.txt")
+    let store = ShelfStore(repository: fixture.repository, indexesSpotlight: false, loadOnInit: false)
+    await store.refresh()
+    XCTAssertEqual(store.historyEvents.count, 1)
+    fixture.advance(by: 24 * 60 * 60)
+
+    await store.openHistory()
+
+    XCTAssertEqual(store.viewMode, .history)
+    XCTAssertTrue(store.historyEvents.isEmpty)
+  }
+
+  func testOpenHistoryChangesViewMode() async throws {
     let store = ShelfStore(
       repository: Fixture.unloadedRepository(),
       indexesSpotlight: false,
       loadOnInit: false
     )
 
-    store.openHistory()
+    await store.openHistory()
 
     XCTAssertEqual(store.viewMode, .history)
   }
@@ -41,7 +55,7 @@ final class ShelfStoreHistoryTests: XCTestCase {
     store.select(item)
     store.toggleSelection(for: item)
 
-    store.openHistory()
+    await store.openHistory()
 
     XCTAssertNil(store.selectedItemID)
     XCTAssertTrue(store.selectedIDs.isEmpty)
@@ -52,7 +66,7 @@ final class ShelfStoreHistoryTests: XCTestCase {
     let export = try await fixture.export(fileName: "History.txt")
     let store = ShelfStore(repository: fixture.repository, indexesSpotlight: false, loadOnInit: false)
     await store.refresh()
-    store.openHistory()
+    await store.openHistory()
 
     await store.refresh()
 
