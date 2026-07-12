@@ -539,7 +539,7 @@ public actor ShelfRepository {
     let sizes = physicalBytesByItemID(updated, now: now)
     let candidates = Set(
       RetentionPolicy().cleanupCandidates(
-        items: updated.filter { localItemSnapshots[$0.id] == nil },
+        items: updated.filter { !exportedItemIDs.contains($0.id) },
         now: now,
         bytesByItemID: sizes,
         quotaBytes: quotaBytes
@@ -658,7 +658,7 @@ public actor ShelfRepository {
   }
 
   private func makeSyncRecords(from source: [ShelfItem]) -> [SyncRecord] {
-    source.filter { localItemSnapshots[$0.id] == nil }.map { item in
+    source.map { item in
       var assets: [String: URL] = [:]
       for nested in flattened([item]) {
         if let path = nested.relativePath,
@@ -774,7 +774,10 @@ public actor ShelfRepository {
       || pruned.localItemSnapshots != localItemSnapshots
       || pruned.history != history else { return }
     let retainedItemIDs = Set(pruned.items.map(\.id))
-    let removed = items.filter { !retainedItemIDs.contains($0.id) }
+    let removedItems = items.filter { !retainedItemIDs.contains($0.id) }
+    let removedSnapshots = localItemSnapshots.filter {
+      pruned.localItemSnapshots[$0.key] == nil
+    }.map(\.value)
     try save(
       pruned.items,
       exportedItemIDs: pruned.exportedItemIDs,
@@ -785,7 +788,7 @@ public actor ShelfRepository {
     exportedItemIDs = pruned.exportedItemIDs
     localItemSnapshots = pruned.localItemSnapshots
     history = pruned.history
-    try deleteUnreferencedFiles(from: removed, remainingItems: items)
+    try deleteUnreferencedFiles(from: removedItems + removedSnapshots, remainingItems: items)
   }
 
   private func prunedState(
@@ -800,12 +803,9 @@ public actor ShelfRepository {
     }
     let retainedHistoryItemIDs = Set(retainedHistory.map(\.itemID))
     let expiredExportedItemIDs = exportedItemIDs.subtracting(retainedHistoryItemIDs)
-    let expiredSnapshotItemIDs = Set(localItemSnapshots.keys).subtracting(retainedHistoryItemIDs)
     let retainedSnapshots = localItemSnapshots.filter { retainedHistoryItemIDs.contains($0.key) }
     return RepositoryManifest(
-      items: items.filter {
-        !expiredExportedItemIDs.contains($0.id) && !expiredSnapshotItemIDs.contains($0.id)
-      },
+      items: items.filter { !expiredExportedItemIDs.contains($0.id) },
       exportedItemIDs: exportedItemIDs.subtracting(expiredExportedItemIDs),
       localItemSnapshots: retainedSnapshots,
       history: retainedHistory
