@@ -65,6 +65,54 @@ final class FinderSelectionReaderTests: XCTestCase {
     XCTAssertNil(FinderSelectionDescriptorParser.parse(malformed))
   }
 
+  func testParserRejectsAliasDescriptors() {
+    let aliases = NSAppleEventDescriptor.list()
+    aliases.insert(
+      NSAppleEventDescriptor(descriptorType: typeAlias, data: Data("alias".utf8))!,
+      at: 1
+    )
+
+    XCTAssertNil(FinderSelectionDescriptorParser.parse(aliases))
+  }
+
+  func testExecutorNormalizesEveryItemToFileURLInOrder() {
+    let first = URL(fileURLWithPath: "/tmp/first.txt")
+    let second = URL(fileURLWithPath: "/tmp/second.txt")
+    let raw = NSAppleEventDescriptor.list()
+    raw.insert(NSAppleEventDescriptor(string: "first"), at: 1)
+    raw.insert(NSAppleEventDescriptor(string: "second"), at: 2)
+    let executor = FinderAppleEventExecutor(
+      send: { .descriptor(raw) },
+      coerceToFileURL: { descriptor in
+        switch descriptor.stringValue {
+        case "first": NSAppleEventDescriptor(fileURL: first)
+        case "second": NSAppleEventDescriptor(fileURL: second)
+        default: nil
+        }
+      }
+    )
+
+    guard case let .descriptor(normalized) = executor.execute() else {
+      return XCTFail("Expected a normalized descriptor")
+    }
+    XCTAssertEqual(FinderSelectionDescriptorParser.parse(normalized), [first, second])
+    XCTAssertEqual(normalized.atIndex(1)?.descriptorType, typeFileURL)
+    XCTAssertEqual(normalized.atIndex(2)?.descriptorType, typeFileURL)
+  }
+
+  func testExecutorRejectsMalformedResponseBeforeParsing() {
+    let raw = NSAppleEventDescriptor.list()
+    raw.insert(NSAppleEventDescriptor(string: "cannot coerce"), at: 1)
+    let executor = FinderAppleEventExecutor(
+      send: { .descriptor(raw) },
+      coerceToFileURL: { _ in nil }
+    )
+
+    guard case .failure = executor.execute() else {
+      return XCTFail("Expected normalization failure")
+    }
+  }
+
   private static func list(_ urls: [URL]) -> NSAppleEventDescriptor {
     let descriptor = NSAppleEventDescriptor.list()
     for (index, url) in urls.enumerated() {
