@@ -4,6 +4,11 @@ import Foundation
 
 @MainActor
 final class QuickSendModel: ObservableObject {
+  enum AsyncActionOutcome {
+    case dismiss
+    case keepOpen(warning: String)
+  }
+
   enum SelectionDirection {
     case up
     case down
@@ -28,7 +33,7 @@ final class QuickSendModel: ObservableObject {
   private let isUndoEligible: (HistoryEvent) -> Bool
   private let primaryAction: (QuickSendResult) -> Void
   private let dismissAction: () -> Void
-  private var asyncPrimaryAction: ((QuickSendResult) async throws -> Void)?
+  private var asyncPrimaryAction: ((QuickSendResult) async throws -> AsyncActionOutcome)?
   private var openHistoryAction: ((HistoryEvent) -> Bool)?
   private var revealHistoryAction: ((HistoryEvent) -> Bool)?
   private var refreshGeneration = 0
@@ -40,6 +45,7 @@ final class QuickSendModel: ObservableObject {
     destinations: @escaping () -> [RecentDestination],
     isUndoEligible: @escaping (HistoryEvent) -> Bool,
     performPrimary: @escaping (QuickSendResult) -> Void,
+    performAsyncPrimary: ((QuickSendResult) async throws -> AsyncActionOutcome)? = nil,
     dismiss: @escaping () -> Void
   ) {
     self.finderReader = finderReader
@@ -48,6 +54,7 @@ final class QuickSendModel: ObservableObject {
     self.destinations = destinations
     self.isUndoEligible = isUndoEligible
     primaryAction = performPrimary
+    asyncPrimaryAction = performAsyncPrimary
     dismissAction = dismiss
   }
 
@@ -73,11 +80,16 @@ final class QuickSendModel: ObservableObject {
         if !outcome.failures.isEmpty {
           throw QuickSendActionError(outcome.failures.map(\.message).joined(separator: "\n"))
         }
+        return .dismiss
       case .undoLatest:
         guard let event = store.historyEvents.first(where: {
           result.semanticID == "undo:\($0.id)"
         }) else { throw QuickSendActionError("The export is no longer available for Undo.") }
-        _ = try await store.undoForQuickSend(event)
+        let outcome = try await store.undoForQuickSend(event)
+        if let warning = outcome.warning {
+          return .keepOpen(warning: warning)
+        }
+        return .dismiss
       case .temporary:
         guard let item = store.items.first(where: {
           result.semanticID == "item:\($0.id)"
@@ -90,6 +102,7 @@ final class QuickSendModel: ObservableObject {
             itemID: item.id, to: url, fileName: item.fileName ?? item.title
           )
         }
+        return .dismiss
       case .history, .destination:
         throw QuickSendActionError("This result cannot be sent.")
       }
@@ -164,10 +177,16 @@ final class QuickSendModel: ObservableObject {
       isOperationRunning = true
       Task {
         do {
-          try await asyncPrimaryAction(selectedResult)
+          let outcome = try await asyncPrimaryAction(selectedResult)
           await refresh()
-          finishOperation(.success(()))
-          dismissAction()
+          switch outcome {
+          case .dismiss:
+            finishOperation(.success(()))
+            dismissAction()
+          case .keepOpen(let warning):
+            inlineError = warning
+            isOperationRunning = false
+          }
         } catch {
           finishOperation(.failure(error))
         }

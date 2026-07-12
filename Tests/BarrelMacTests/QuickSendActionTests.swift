@@ -130,6 +130,80 @@ struct QuickSendActionTests {
     #expect(!store.isUndoEligible(export))
   }
 
+  @Test func committedUndoCleanupWarningRefreshesAndKeepsQuickSendOpen() async throws {
+    let manager = ActionUndoCleanupFailureFileManager()
+    let fixture = try await ActionFixture(fileManager: manager)
+    let store = fixture.store
+    _ = await store.importURLsForQuickSend([fixture.source])
+    let item = try #require(store.items.first)
+    _ = try await store.exportForQuickSend(
+      itemID: item.id, to: fixture.destination, fileName: "Cleanup.txt"
+    )
+    manager.failUndoCleanup = true
+    var dismissals = 0
+    let model = QuickSendModel(
+      store: store, finderReader: ActionFinderReader(state: .empty),
+      destinationResolver: RecentDestinationResolver(), dismiss: { dismissals += 1 }
+    )
+    model.query = "txt"
+    await model.refresh()
+    model.selectedResultID = try #require(model.resultsInGroup(.undoLatest).first).id
+
+    model.performPrimary()
+    await waitUntil { !model.isOperationRunning }
+
+    #expect(dismissals == 0)
+    #expect(model.query == "txt")
+    #expect(model.selectedResult?.group == .temporary)
+    #expect(model.resultsInGroup(.undoLatest).isEmpty)
+    #expect(model.inlineError == "Undo was saved, but its recovery bytes could not be removed.")
+  }
+
+  @Test func ordinarySuccessfulUndoDismissesQuickSend() async throws {
+    let fixture = try await ActionFixture()
+    let store = fixture.store
+    _ = await store.importURLsForQuickSend([fixture.source])
+    let item = try #require(store.items.first)
+    _ = try await store.exportForQuickSend(
+      itemID: item.id, to: fixture.destination, fileName: "Undo.txt"
+    )
+    var dismissals = 0
+    let model = QuickSendModel(
+      store: store, finderReader: ActionFinderReader(state: .empty),
+      destinationResolver: RecentDestinationResolver(), dismiss: { dismissals += 1 }
+    )
+    await model.refresh()
+    model.selectedResultID = model.resultsInGroup(.undoLatest).first?.id
+
+    model.performPrimary()
+    await waitUntil { !model.isOperationRunning }
+
+    #expect(dismissals == 1)
+    #expect(model.inlineError == nil)
+  }
+
+  @Test func importURLsRefreshesAfterAllFailureWithoutPostingChangeNotification() async throws {
+    let fixture = try await ActionFixture()
+    let store = fixture.store
+    let external = await fixture.repository.importFiles(
+      [fixture.source], origin: .imported, expiresAt: nil
+    )
+    #expect(external.successes.count == 1)
+    let folder = fixture.root.appendingPathComponent("Folder", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    var notifications = 0
+    let token = NotificationCenter.default.addObserver(
+      forName: .repositoryDidChange, object: store, queue: nil
+    ) { _ in notifications += 1 }
+    defer { NotificationCenter.default.removeObserver(token) }
+
+    store.importURLs([folder])
+    await waitUntil { store.errorMessage != nil }
+
+    #expect(store.liveItemCount == 1)
+    #expect(notifications == 0)
+  }
+
   @Test func historyOpenAndRevealAreTolerantOfDeletion() async throws {
     let fixture = try await ActionFixture()
     let store = fixture.store
@@ -177,7 +251,7 @@ private final class ActionFixture: @unchecked Sendable {
     ShelfStore(repository: repository, indexesSpotlight: false, loadOnInit: false)
   }
 
-  init() async throws {
+  init(fileManager: FileManager = .default) async throws {
     root = FileManager.default.temporaryDirectory
       .appendingPathComponent("QuickSendActionTests-\(UUID().uuidString)", isDirectory: true)
     source = root.appendingPathComponent("Source.txt")
@@ -186,9 +260,20 @@ private final class ActionFixture: @unchecked Sendable {
     try Data("contents".utf8).write(to: source)
     repository = ShelfRepository(configuration: RepositoryConfiguration(
       rootURL: root.appendingPathComponent("Repository", isDirectory: true), deviceID: "test"
-    ))
+    ), fileManager: fileManager)
     _ = try await repository.load()
   }
 
   deinit { try? FileManager.default.removeItem(at: root) }
+}
+
+private final class ActionUndoCleanupFailureFileManager: FileManager, @unchecked Sendable {
+  var failUndoCleanup = false
+
+  override func removeItem(at URL: URL) throws {
+    if failUndoCleanup, URL.lastPathComponent.hasPrefix(".barrel-undo-") {
+      throw CocoaError(.fileWriteNoPermission)
+    }
+    try super.removeItem(at: URL)
+  }
 }

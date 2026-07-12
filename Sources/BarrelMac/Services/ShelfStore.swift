@@ -160,8 +160,8 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
     let outcome = await repository.importFiles(urls, origin: .imported, expiresAt: nil)
     if !outcome.successes.isEmpty {
       notifyRepositoryChange()
-      await refresh(preferredSelection: outcome.successes.first?.id)
     }
+    await refresh(preferredSelection: outcome.successes.first?.id)
     return outcome
   }
 

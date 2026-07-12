@@ -151,7 +151,7 @@ final class ShelfStoreHistoryTests: XCTestCase {
     let displayed = try XCTUnwrap(store.items.first)
     let syncBeforeReexport = try await fixture.repository.syncRecords()
 
-    let reexport = try await store.export(
+    let reexport = try await store.exportForQuickSend(
       itemID: displayed.id,
       to: fixture.destination,
       fileName: "Overlay Again.txt"

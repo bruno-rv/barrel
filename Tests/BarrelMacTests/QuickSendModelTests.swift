@@ -275,6 +275,31 @@ struct QuickSendModelTests {
     #expect(model.inlineError == "Failed")
   }
 
+  @Test func committedWarningOutcomeKeepsSelectionQueryAndPanelOpen() async {
+    let shelfItem = item("Source.txt", kind: .file)
+    var dismissals = 0
+    let model = QuickSendModel(
+      finderReader: StaticFinderReader(state: .empty),
+      items: { [shelfItem] }, history: { [] }, destinations: { [] },
+      isUndoEligible: { _ in false }, performPrimary: { _ in },
+      performAsyncPrimary: { _ in
+        .keepOpen(warning: "Undo was saved with a cleanup warning.")
+      },
+      dismiss: { dismissals += 1 }
+    )
+    model.query = "source"
+    await model.refresh()
+    let selection = model.selectedResultID
+
+    model.performPrimary()
+    while model.isOperationRunning { await Task.yield() }
+
+    #expect(dismissals == 0)
+    #expect(model.query == "source")
+    #expect(model.selectedResultID == selection)
+    #expect(model.inlineError == "Undo was saved with a cleanup warning.")
+  }
+
   private func makeModel(
     finder: FinderSelectionState = .empty,
     reader: FinderSelectionReading? = nil,
