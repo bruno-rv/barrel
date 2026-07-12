@@ -39,26 +39,30 @@ enum FinderSelectionDescriptorParser {
 }
 
 struct FinderAppleEventExecutor: @unchecked Sendable {
-  private let send: () -> FinderAppleEventResult
-  private let coerceToFileURL: (NSAppleEventDescriptor) -> NSAppleEventDescriptor?
+  private let send: (NSAppleEventDescriptor) -> FinderAppleEventResult
+  private let coerce: (NSAppleEventDescriptor, DescType) -> NSAppleEventDescriptor?
 
   init() {
     self.init(
-      send: { Self.sendSelectionEvent() },
-      coerceToFileURL: { Self.coerceToFileURL($0) }
+      send: { Self.sendSelectionEvent($0) },
+      coerce: { Self.coerce($0, to: $1) }
     )
   }
 
   init(
-    send: @escaping () -> FinderAppleEventResult,
-    coerceToFileURL: @escaping (NSAppleEventDescriptor) -> NSAppleEventDescriptor?
+    send: @escaping (NSAppleEventDescriptor) -> FinderAppleEventResult,
+    coerce: @escaping (NSAppleEventDescriptor, DescType) -> NSAppleEventDescriptor?
   ) {
     self.send = send
-    self.coerceToFileURL = coerceToFileURL
+    self.coerce = coerce
   }
 
   func execute() -> FinderAppleEventResult {
-    switch send() {
+    guard let event = Self.selectionEvent() else {
+      return .failure(errAECoercionFail)
+    }
+
+    switch send(event) {
     case let .failure(error):
       return .failure(error)
     case let .descriptor(raw):
@@ -70,7 +74,8 @@ struct FinderAppleEventExecutor: @unchecked Sendable {
       for offset in 0..<raw.numberOfItems {
         let index = offset + 1
         guard let item = raw.atIndex(index),
-              let fileURL = coerceToFileURL(item),
+              item.descriptorType == typeAlias || item.descriptorType == typeFileURL,
+              let fileURL = coerce(item, typeFileURL),
               fileURL.descriptorType == typeFileURL
         else {
           return .failure(errAECoercionFail)
@@ -81,14 +86,17 @@ struct FinderAppleEventExecutor: @unchecked Sendable {
     }
   }
 
-  private static func coerceToFileURL(_ descriptor: NSAppleEventDescriptor) -> NSAppleEventDescriptor? {
+  private static func coerce(
+    _ descriptor: NSAppleEventDescriptor,
+    to type: DescType
+  ) -> NSAppleEventDescriptor? {
     guard let source = descriptor.aeDesc else { return nil }
     var coerced = AEDesc()
-    guard AECoerceDesc(source, typeFileURL, &coerced) == noErr else { return nil }
+    guard AECoerceDesc(source, type, &coerced) == noErr else { return nil }
     return NSAppleEventDescriptor(aeDescNoCopy: &coerced)
   }
 
-  private static func sendSelectionEvent() -> FinderAppleEventResult {
+  private static func selectionEvent() -> NSAppleEventDescriptor? {
     let target = NSAppleEventDescriptor(bundleIdentifier: "com.apple.finder")
     let event = NSAppleEventDescriptor(
       eventClass: AEEventClass(kAECoreSuite),
@@ -97,11 +105,16 @@ struct FinderAppleEventExecutor: @unchecked Sendable {
       returnID: AEReturnID(kAutoGenerateReturnID),
       transactionID: AETransactionID(kAnyTransactionID)
     )
-    guard let selection = selectionObjectSpecifier() else {
-      return .failure(errAECoercionFail)
-    }
+    guard let selection = selectionObjectSpecifier() else { return nil }
     event.setParam(selection, forKeyword: AEKeyword(keyDirectObject))
+    event.setParam(
+      NSAppleEventDescriptor(typeCode: typeAlias),
+      forKeyword: AEKeyword(keyAERequestedType)
+    )
+    return event
+  }
 
+  private static func sendSelectionEvent(_ event: NSAppleEventDescriptor) -> FinderAppleEventResult {
     guard let eventDesc = event.aeDesc else {
       return .failure(errAEEventNotHandled)
     }

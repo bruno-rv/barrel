@@ -2,13 +2,13 @@
 
 ## Status
 
-Implemented the protocol-backed Finder selection reader with AppleScript/Apple Events.
+Implemented the protocol-backed Finder selection reader with direct Apple Events.
 
 ## Behavior
 
 - Reads Finder selection only when Finder is the frontmost application.
-- Executes AppleScript on a detached task so Apple Events do not block the main actor.
-- Parses Apple-event descriptors through a pure parser that accepts only ordered lists of file URL or alias descriptors.
+- Executes the Apple Event on a detached task so Finder IPC does not block the main actor.
+- Requests Finder's selection as resolved aliases, normalizes only alias/file URL reply items to file URLs, then passes only ordered file URL lists to the strict parser.
 - Preserves file/folder URL order and distinguishes selection, empty selection, unavailable/malformed responses, and Automation permission denial (`-1743`).
 - Uses neither Accessibility APIs nor synthetic keyboard input.
 
@@ -16,7 +16,7 @@ Implemented the protocol-backed Finder selection reader with AppleScript/Apple E
 
 - Red: `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter FinderSelectionReaderTests` failed because the reader, state, result, and parser symbols did not exist.
 - The first implementation run caught an overly permissive parser: `fileURLValue` coerced a string descriptor into a URL, causing the malformed-list test to fail.
-- Green: the parser was constrained to file URL and alias descriptor types; all 6 focused tests passed.
+- Green: the parser was constrained to file URL descriptors; all 6 original focused tests passed.
 
 ## Concerns
 
@@ -33,3 +33,13 @@ Implemented the protocol-backed Finder selection reader with AppleScript/Apple E
 - GREEN (full): `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test` executed 192 tests with 0 failures.
 - Static scope check found no `NSAppleScript`, `osascript`, Accessibility, or synthetic-input usage in the changed reader/tests.
 - Remaining concern: the signed-app Automation consent and Finder reply require a manual smoke test; unit tests deliberately do not contact Finder.
+
+## 2026-07-12 real Finder resolution follow-up
+
+- Root cause: the direct `get data` event omitted `keyAERequestedType`, so Finder could return unresolved object specifiers that cannot be usefully coerced to file URLs in the caller process.
+- The production event now sets `keyAERequestedType` to `typeAlias`, matching the requested-type behavior of `selection as alias list`; Finder performs object resolution before replying.
+- Local `AECoerceDesc` is now limited to resolved `typeAlias` or `typeFileURL` reply items and always requests `typeFileURL`. Object-specifier reply items fail without attempting local coercion.
+- The production-event seam records the actual event and coercion arguments. Tests assert event class/ID, direct-object specifier, requested alias type, alias reply order, file-URL coercion type/order, and object-specifier rejection.
+- RED: the focused test target failed to compile because the existing executor seam could not inspect the event or coercion destination type.
+- GREEN (focused): `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter FinderSelectionReaderTests` executed 10 tests with 0 failures.
+- GREEN (full): `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test` executed 193 tests with 0 failures.

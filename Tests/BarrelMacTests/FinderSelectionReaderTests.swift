@@ -75,19 +75,46 @@ final class FinderSelectionReaderTests: XCTestCase {
     XCTAssertNil(FinderSelectionDescriptorParser.parse(aliases))
   }
 
-  func testExecutorNormalizesEveryItemToFileURLInOrder() {
+  func testExecutorRequestsFinderSelectionAsAliases() {
+    var sentEvent: NSAppleEventDescriptor?
+    let executor = FinderAppleEventExecutor(
+      send: { event in
+        sentEvent = event
+        return .descriptor(NSAppleEventDescriptor.list())
+      },
+      coerce: { _, _ in nil }
+    )
+
+    _ = executor.execute()
+
+    XCTAssertEqual(sentEvent?.eventClass, AEEventClass(kAECoreSuite))
+    XCTAssertEqual(sentEvent?.eventID, AEEventID(kAEGetData))
+    XCTAssertEqual(
+      sentEvent?.paramDescriptor(forKeyword: AEKeyword(keyDirectObject))?.descriptorType,
+      typeObjectSpecifier
+    )
+    XCTAssertEqual(
+      sentEvent?.paramDescriptor(forKeyword: AEKeyword(keyAERequestedType))?.typeCodeValue,
+      typeAlias
+    )
+  }
+
+  func testExecutorCoercesResolvedAliasesToFileURLsInOrder() {
     let first = URL(fileURLWithPath: "/tmp/first.txt")
     let second = URL(fileURLWithPath: "/tmp/second.txt")
     let raw = NSAppleEventDescriptor.list()
-    raw.insert(NSAppleEventDescriptor(string: "first"), at: 1)
-    raw.insert(NSAppleEventDescriptor(string: "second"), at: 2)
+    raw.insert(Self.alias("first"), at: 1)
+    raw.insert(Self.alias("second"), at: 2)
+    var coercions: [(String?, DescType)] = []
     let executor = FinderAppleEventExecutor(
-      send: { .descriptor(raw) },
-      coerceToFileURL: { descriptor in
-        switch descriptor.stringValue {
-        case "first": NSAppleEventDescriptor(fileURL: first)
-        case "second": NSAppleEventDescriptor(fileURL: second)
-        default: nil
+      send: { _ in .descriptor(raw) },
+      coerce: { descriptor, type in
+        let value = String(data: descriptor.data, encoding: .utf8)
+        coercions.append((value, type))
+        switch value {
+        case "first": return NSAppleEventDescriptor(fileURL: first)
+        case "second": return NSAppleEventDescriptor(fileURL: second)
+        default: return nil
         }
       }
     )
@@ -98,19 +125,29 @@ final class FinderSelectionReaderTests: XCTestCase {
     XCTAssertEqual(FinderSelectionDescriptorParser.parse(normalized), [first, second])
     XCTAssertEqual(normalized.atIndex(1)?.descriptorType, typeFileURL)
     XCTAssertEqual(normalized.atIndex(2)?.descriptorType, typeFileURL)
+    XCTAssertEqual(coercions.map(\.0), ["first", "second"])
+    XCTAssertEqual(coercions.map(\.1), [typeFileURL, typeFileURL])
   }
 
-  func testExecutorRejectsMalformedResponseBeforeParsing() {
+  func testExecutorRejectsObjectSpecifierReplyWithoutLocalCoercion() {
     let raw = NSAppleEventDescriptor.list()
-    raw.insert(NSAppleEventDescriptor(string: "cannot coerce"), at: 1)
+    raw.insert(
+      NSAppleEventDescriptor(descriptorType: typeObjectSpecifier, data: Data("object".utf8))!,
+      at: 1
+    )
+    var coercionCount = 0
     let executor = FinderAppleEventExecutor(
-      send: { .descriptor(raw) },
-      coerceToFileURL: { _ in nil }
+      send: { _ in .descriptor(raw) },
+      coerce: { _, _ in
+        coercionCount += 1
+        return nil
+      }
     )
 
     guard case .failure = executor.execute() else {
       return XCTFail("Expected normalization failure")
     }
+    XCTAssertEqual(coercionCount, 0)
   }
 
   private static func list(_ urls: [URL]) -> NSAppleEventDescriptor {
@@ -119,6 +156,10 @@ final class FinderSelectionReaderTests: XCTestCase {
       descriptor.insert(NSAppleEventDescriptor(fileURL: url), at: index + 1)
     }
     return descriptor
+  }
+
+  private static func alias(_ value: String) -> NSAppleEventDescriptor {
+    NSAppleEventDescriptor(descriptorType: typeAlias, data: Data(value.utf8))!
   }
 }
 
