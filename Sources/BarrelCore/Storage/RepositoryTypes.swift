@@ -11,6 +11,7 @@ public struct RepositoryConfiguration: Sendable {
   public let deviceID: String
   public let quotaBytes: Int64
   public let trashRetention: TimeInterval
+  public let historyRetention: TimeInterval
   public let now: @Sendable () -> Date
   public let manifestWriter: ManifestWriter
 
@@ -19,6 +20,7 @@ public struct RepositoryConfiguration: Sendable {
     deviceID: String,
     quotaBytes: Int64 = 1_073_741_824,
     trashRetention: TimeInterval = 604_800,
+    historyRetention: TimeInterval = 86_400,
     now: @escaping @Sendable () -> Date = { Date() },
     manifestWriter: @escaping ManifestWriter = RepositoryConfiguration.defaultManifestWriter
   ) {
@@ -26,6 +28,7 @@ public struct RepositoryConfiguration: Sendable {
     self.deviceID = deviceID
     self.quotaBytes = quotaBytes
     self.trashRetention = trashRetention
+    self.historyRetention = historyRetention
     self.now = now
     self.manifestWriter = manifestWriter
   }
@@ -71,6 +74,11 @@ public enum RepositoryError: Error, Equatable, Sendable {
   case itemNotFound(UUID)
   case invalidStack(UUID)
   case invalidSelection
+  case undoIneligible(UUID)
+  case undoTargetMissing(URL)
+  case undoTargetChanged(URL)
+  case undoTargetInaccessible(URL)
+  case undoTargetNotRegularFile(URL)
 }
 
 extension RepositoryError: LocalizedError {
@@ -86,6 +94,16 @@ extension RepositoryError: LocalizedError {
       "The selected item is not a stack."
     case .invalidSelection:
       "Select at least two shelf items."
+    case .undoIneligible:
+      "This export is no longer eligible for Undo."
+    case .undoTargetMissing:
+      "The exported file is missing."
+    case .undoTargetChanged:
+      "The exported file has changed."
+    case .undoTargetInaccessible:
+      "The exported file is inaccessible."
+    case .undoTargetNotRegularFile:
+      "The export destination is no longer a regular file."
     }
   }
 }

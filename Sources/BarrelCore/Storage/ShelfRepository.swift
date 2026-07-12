@@ -5,6 +5,8 @@ public actor ShelfRepository {
   private let configuration: RepositoryConfiguration
   private let fileManager: FileManager
   private var items: [ShelfItem] = []
+  private var exportedItemIDs: Set<UUID> = []
+  private var history: [HistoryEvent] = []
   private var quotaBytes: Int64
   private var isLoaded = false
 
@@ -32,18 +34,28 @@ public actor ShelfRepository {
     try prepareStorage()
     guard fileManager.fileExists(atPath: manifestURL.path) else {
       items = []
+      exportedItemIDs = []
+      history = []
       try clearStaging()
       try removeOrphans()
       isLoaded = true
       return items
     }
 
-    let decoded: [ShelfItem]
+    let decoded: RepositoryManifest
     do {
       let data = try Data(contentsOf: manifestURL)
       let decoder = JSONDecoder()
       decoder.dateDecodingStrategy = .iso8601
-      decoded = try decoder.decode([ShelfItem].self, from: data)
+      if let manifest = try? decoder.decode(RepositoryManifest.self, from: data) {
+        decoded = manifest
+      } else {
+        decoded = RepositoryManifest(
+          items: try decoder.decode([ShelfItem].self, from: data),
+          exportedItemIDs: [],
+          history: []
+        )
+      }
     } catch {
       try preserveCorruptManifest()
       try fileManager.removeItem(at: manifestURL)
@@ -53,8 +65,15 @@ public actor ShelfRepository {
       throw RepositoryError.corruptManifest
     }
 
-    try save(decoded)
-    items = decoded
+    let pruned = prunedState(
+      items: decoded.items,
+      exportedItemIDs: decoded.exportedItemIDs,
+      history: decoded.history
+    )
+    try save(pruned.items, exportedItemIDs: pruned.exportedItemIDs, history: pruned.history)
+    items = pruned.items
+    exportedItemIDs = pruned.exportedItemIDs
+    history = pruned.history
     try clearStaging()
     try removeOrphans()
     isLoaded = true
@@ -63,6 +82,16 @@ public actor ShelfRepository {
 
   public func snapshot() -> [ShelfItem] {
     items
+  }
+
+  public func historySnapshot() throws -> [HistoryEvent] {
+    try ensureLoaded()
+    try pruneHistory()
+    return history.sorted {
+      $0.timestamp == $1.timestamp
+        ? $0.id.uuidString < $1.id.uuidString
+        : $0.timestamp > $1.timestamp
+    }
   }
 
   public func setStorageQuota(_ bytes: Int64) {
@@ -475,11 +504,52 @@ public actor ShelfRepository {
     items = updated
   }
 
-  private func save(_ items: [ShelfItem]) throws {
+  private func save(
+    _ items: [ShelfItem],
+    exportedItemIDs: Set<UUID>? = nil,
+    history: [HistoryEvent]? = nil
+  ) throws {
     let encoder = JSONEncoder()
     encoder.dateEncodingStrategy = .iso8601
-    let data = try encoder.encode(items)
+    let manifest = RepositoryManifest(
+      items: items,
+      exportedItemIDs: exportedItemIDs ?? self.exportedItemIDs,
+      history: history ?? self.history
+    )
+    let data = try encoder.encode(manifest)
     try configuration.manifestWriter(data, manifestURL)
+  }
+
+  private func pruneHistory() throws {
+    let pruned = prunedState(items: items, exportedItemIDs: exportedItemIDs, history: history)
+    guard pruned.items != items
+      || pruned.exportedItemIDs != exportedItemIDs
+      || pruned.history != history else { return }
+    let retainedItemIDs = Set(pruned.items.map(\.id))
+    let removed = items.filter { !retainedItemIDs.contains($0.id) }
+    try save(pruned.items, exportedItemIDs: pruned.exportedItemIDs, history: pruned.history)
+    items = pruned.items
+    exportedItemIDs = pruned.exportedItemIDs
+    history = pruned.history
+    try deleteUnreferencedFiles(from: removed, remainingItems: items)
+  }
+
+  private func prunedState(
+    items: [ShelfItem],
+    exportedItemIDs: Set<UUID>,
+    history: [HistoryEvent]
+  ) -> RepositoryManifest {
+    let now = configuration.now()
+    let retainedHistory = history.filter {
+      now.timeIntervalSince($0.timestamp) < configuration.historyRetention
+    }
+    let retainedHistoryItemIDs = Set(retainedHistory.map(\.itemID))
+    let expiredExportedItemIDs = exportedItemIDs.subtracting(retainedHistoryItemIDs)
+    return RepositoryManifest(
+      items: items.filter { !expiredExportedItemIDs.contains($0.id) },
+      exportedItemIDs: exportedItemIDs.subtracting(expiredExportedItemIDs),
+      history: retainedHistory
+    )
   }
 
   private func preserveCorruptManifest() throws {
@@ -738,4 +808,10 @@ private enum StagingResult: Sendable {
     case .failure(let index, _, _): index
     }
   }
+}
+
+private struct RepositoryManifest: Codable {
+  var items: [ShelfItem]
+  var exportedItemIDs: Set<UUID>
+  var history: [HistoryEvent]
 }
