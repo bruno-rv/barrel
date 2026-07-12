@@ -16,8 +16,10 @@ private final class ActivationSpy: QuickSendActivating {
 @MainActor
 private final class FocusSchedulerSpy: QuickSendFocusScheduling {
   var lastResponder: NSResponder?
+  var focusCount = 0
   func scheduleFocus(_ responder: NSResponder, in window: NSWindow) {
     lastResponder = responder
+    focusCount += 1
   }
 }
 
@@ -34,6 +36,21 @@ private final class FinderExecutionSpy: @unchecked Sendable {
     let list = NSAppleEventDescriptor.list()
     list.insert(NSAppleEventDescriptor(fileURL: URL(fileURLWithPath: "/tmp/Selected.txt")), at: 1)
     return .descriptor(list)
+  }
+
+  var callCount: Int { lock.withLock { count } }
+}
+
+private final class CountingFinderReader: FinderSelectionReading, @unchecked Sendable {
+  private let lock = NSLock()
+  private var count = 0
+  let state: FinderSelectionState
+
+  init(state: FinderSelectionState) { self.state = state }
+
+  func readSelection(context: FinderSelectionContext) async -> FinderSelectionState {
+    lock.withLock { count += 1 }
+    return state
   }
 
   var callCount: Int { lock.withLock { count } }
@@ -82,7 +99,7 @@ struct QuickSendPanelControllerTests {
     #expect(commands == [.up, .down, .primary, .secondary, .escape])
   }
 
-  @Test func showReusesPanelActivatesEveryTimeCentersOnPointerScreenAndSchedulesFocus() {
+  @Test func showReusesPanelActivatesEveryTimeCentersInitialFrameAndSchedulesFocus() {
     let activation = ActivationSpy()
     let focus = FocusSchedulerSpy()
     let panel = QuickSendPanelController.makePanel(contentView: NSView())
@@ -99,13 +116,88 @@ struct QuickSendPanelControllerTests {
 
     controller.show()
     let firstPanel = controller.panelForTesting
+    let firstFrame = panel.frame
     controller.show()
 
     #expect(controller.panelForTesting === firstPanel)
     #expect(activation.activationCount == 2)
     #expect(focus.lastResponder === searchField)
     #expect(panel.frame.midX == 900)
-    #expect(panel.frame.midY == 300)
+    #expect(panel.frame == firstFrame)
+    panel.orderOut(nil)
+  }
+
+  @Test func repeatedShowWhileVisiblePreservesSessionAndHiddenShowRefreshesContext() async {
+    let selectedURLs = [
+      URL(fileURLWithPath: "/tmp/Selected.txt"),
+      URL(fileURLWithPath: "/tmp/Also Selected.txt")
+    ]
+    let reader = CountingFinderReader(state: .selection(selectedURLs))
+    let item = ShelfItem(title: "Source", kind: .file)
+    let activation = ActivationSpy()
+    let focus = FocusSchedulerSpy()
+    let panel = QuickSendPanelController.makePanel(contentView: NSView())
+    let searchField = NSSearchField()
+    var contextCount = 0
+    var mouseLocation = NSPoint(x: 250, y: 250)
+    let model = QuickSendModel(
+      finderReader: reader, items: { [item] }, history: { [] }, destinations: { [] },
+      isUndoEligible: { _ in false }, performPrimary: { _ in }, dismiss: {}
+    )
+    let controller = QuickSendPanelController(
+      model: model, panel: panel, activator: activation, focusScheduler: focus,
+      finderContextProvider: {
+        contextCount += 1
+        return .finderWasFrontmost
+      },
+      mouseLocation: { mouseLocation },
+      screenFrames: { [NSRect(x: 0, y: 0, width: 500, height: 500)] }
+    )
+    controller.registerSearchField(searchField)
+
+    controller.show()
+    while reader.callCount < 1 || model.results.isEmpty { await Task.yield() }
+    model.setQuery("Source")
+    model.selectResult("item:\(item.id)")
+    model.performSecondary()
+    model.setQuery("Selected")
+    model.isOperationRunning = true
+    let firstPanel = controller.panelForTesting
+    let firstFrame = panel.frame
+    let firstQuery = model.query
+    let firstResults = model.results
+    let firstFinderState = model.finderState
+    let firstSelection = model.selectedResultID
+    let firstSecondaryMode = model.secondaryMode
+    mouseLocation = NSPoint(x: 450, y: 450)
+
+    controller.show()
+    await Task.yield()
+
+    #expect(controller.panelForTesting === firstPanel)
+    #expect(panel.frame == firstFrame)
+    #expect(model.query == firstQuery)
+    #expect(model.results == firstResults)
+    #expect(model.finderState == firstFinderState)
+    #expect(model.finderState == .selection(selectedURLs))
+    #expect(model.query == "Selected")
+    #expect(model.results.first?.semanticID.hasPrefix("finder:") == true)
+    #expect(model.results.first?.finderURLs == selectedURLs)
+    #expect(model.selectedResultID == firstSelection)
+    #expect(model.secondaryMode == firstSecondaryMode)
+    #expect(reader.callCount == 1)
+    #expect(contextCount == 1)
+    #expect(activation.activationCount == 2)
+    #expect(focus.focusCount == 2)
+
+    model.isOperationRunning = false
+    panel.orderOut(nil)
+    controller.show()
+    while reader.callCount < 2 { await Task.yield() }
+
+    #expect(contextCount == 2)
+    #expect(activation.activationCount == 3)
+    #expect(focus.focusCount == 3)
     panel.orderOut(nil)
   }
 

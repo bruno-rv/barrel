@@ -57,18 +57,24 @@ struct RecentDestinationResolver: RecentDestinationResolving, Sendable {
           : $0.timestamp > $1.timestamp
       }
       .compactMap { event in
-        let bookmarkURL = event.destinationDirectoryBookmark.flatMap(resolveBookmark)
+        let bookmarkURL = event.destinationDirectoryBookmark
+          .flatMap(resolveBookmark)?
+          .standardizedFileURL
         let legacyURL = event.destinationURL?.deletingLastPathComponent()
-        guard let standardizedURL = [bookmarkURL, legacyURL]
-          .compactMap({ $0?.standardizedFileURL })
-          .first(where: fileExists)
-        else {
+        let standardizedURL: URL
+        let usedBookmark: Bool
+        if let bookmarkURL, bookmarkDirectoryExists(bookmarkURL) {
+          standardizedURL = bookmarkURL
+          usedBookmark = true
+        } else if let legacyURL = legacyURL?.standardizedFileURL, fileExists(legacyURL) {
+          standardizedURL = legacyURL
+          usedBookmark = false
+        } else {
           return nil
         }
         guard seenPaths.insert(standardizedURL.path).inserted else {
           return nil
         }
-        let usedBookmark = bookmarkURL?.standardizedFileURL == standardizedURL
         return RecentDestination(
           id: standardizedURL.path,
           name: standardizedURL.lastPathComponent,
@@ -77,6 +83,16 @@ struct RecentDestinationResolver: RecentDestinationResolving, Sendable {
           lastUsedAt: event.timestamp
         )
       }
+  }
+
+  private func bookmarkDirectoryExists(_ url: URL) -> Bool {
+    let scoped = startAccessing(url)
+    defer {
+      if scoped {
+        stopAccessing(url)
+      }
+    }
+    return fileExists(url)
   }
 
   func withAccess<Result: Sendable>(

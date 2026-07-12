@@ -77,11 +77,12 @@ struct QuickSendActionTests {
     model.selectedResultID = model.resultsInGroup(.temporary).first?.id
 
     model.performPrimary()
+    let startsBeforeExport = access.starts
     model.activateResult(try #require(model.layerResults.first).id)
     await waitUntil { !model.isOperationRunning }
 
-    #expect(access.starts == 1)
-    #expect(access.stops == 1)
+    #expect(access.starts > startsBeforeExport)
+    #expect(access.stops == access.starts)
     #expect(!access.isActive)
     #expect(store.liveItemCount == 0)
   }

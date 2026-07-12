@@ -103,6 +103,12 @@ final class QuickSendPanelController: NSObject, NSWindowDelegate {
   }
 
   func show() {
+    if panel.isVisible {
+      activator.activate()
+      panel.makeKeyAndOrderFront(nil)
+      if let searchField { focusScheduler.scheduleFocus(searchField, in: panel) }
+      return
+    }
     let finderContext = finderContextProvider()
     activator.activate()
     centerOnActiveScreen()

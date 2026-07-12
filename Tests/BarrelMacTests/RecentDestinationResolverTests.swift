@@ -128,6 +128,61 @@ final class RecentDestinationResolverTests: XCTestCase {
     XCTAssertNil(destinations.first?.bookmark)
   }
 
+  func testValidatesResolvedBookmarkWhileSecurityScopeIsActiveAndBalancesAccess() {
+    let bookmark = Data("bookmark".utf8)
+    let directory = URL(fileURLWithPath: "/scoped", isDirectory: true)
+    let state = LockedScopeState()
+    let resolver = RecentDestinationResolver(
+      now: { Date(timeIntervalSince1970: 10) },
+      resolveBookmark: { $0 == bookmark ? directory : nil },
+      fileExists: { url in
+        XCTAssertTrue(state.isActive)
+        return url == directory
+      },
+      startAccessing: { _ in state.start() },
+      stopAccessing: { _ in state.stop() }
+    )
+
+    let destinations = resolver.destinations(from: [event(destinationURL: nil, bookmark: bookmark)])
+
+    XCTAssertEqual(destinations.map(\.url), [directory])
+    XCTAssertFalse(state.isActive)
+    XCTAssertEqual(state.startCount, 1)
+    XCTAssertEqual(state.stopCount, 1)
+  }
+
+  func testStopsScopeAfterInvalidBookmarkBeforeUsingUnscopedLegacyFallback() {
+    let bookmark = Data("bookmark".utf8)
+    let bookmarkDirectory = URL(fileURLWithPath: "/scoped-missing", isDirectory: true)
+    let legacyDirectory = URL(fileURLWithPath: "/legacy", isDirectory: true)
+    let state = LockedScopeState()
+    let resolver = RecentDestinationResolver(
+      now: { Date(timeIntervalSince1970: 10) },
+      resolveBookmark: { $0 == bookmark ? bookmarkDirectory : nil },
+      fileExists: { url in
+        if url == bookmarkDirectory {
+          XCTAssertTrue(state.isActive)
+          return false
+        }
+        XCTAssertFalse(state.isActive)
+        return url == legacyDirectory
+      },
+      startAccessing: { _ in state.start() },
+      stopAccessing: { _ in state.stop() }
+    )
+    let export = event(
+      destinationURL: legacyDirectory.appendingPathComponent("file.txt"), bookmark: bookmark
+    )
+
+    let destinations = resolver.destinations(from: [export])
+
+    XCTAssertEqual(destinations.map(\.url), [legacyDirectory])
+    XCTAssertNil(destinations.first?.bookmark)
+    XCTAssertFalse(state.isActive)
+    XCTAssertEqual(state.startCount, 1)
+    XCTAssertEqual(state.stopCount, 1)
+  }
+
   func testSecurityScopeRemainsActiveUntilAwaitedOperationReturns() async throws {
     let directory = URL(fileURLWithPath: "/scoped", isDirectory: true)
     let state = LockedScopeState()
@@ -184,13 +239,18 @@ final class RecentDestinationResolverTests: XCTestCase {
 private final class LockedScopeState: @unchecked Sendable {
   private let lock = NSLock()
   private var active = false
+  private var starts = 0
   private var stops = 0
 
   var isActive: Bool { lock.withLock { active } }
+  var startCount: Int { lock.withLock { starts } }
   var stopCount: Int { lock.withLock { stops } }
 
   func start() -> Bool {
-    lock.withLock { active = true }
+    lock.withLock {
+      active = true
+      starts += 1
+    }
     return true
   }
 
