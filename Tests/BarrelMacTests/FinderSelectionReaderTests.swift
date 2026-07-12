@@ -7,53 +7,48 @@ final class FinderSelectionReaderTests: XCTestCase {
     let first = URL(fileURLWithPath: "/tmp/first.txt")
     let second = URL(fileURLWithPath: "/tmp/Folder", isDirectory: true)
     let reader = FinderSelectionReader(
-      frontmostBundleID: { "com.apple.finder" },
       execute: { .descriptor(Self.list([first, second])) }
     )
 
-    let state = await reader.readSelection()
+    let state = await reader.readSelection(context: .finderWasFrontmost)
     XCTAssertEqual(state, .selection([first, second]))
   }
 
   func testReturnsEmptyForEmptySelection() async {
     let reader = FinderSelectionReader(
-      frontmostBundleID: { "com.apple.finder" },
       execute: { .descriptor(NSAppleEventDescriptor.list()) }
     )
 
-    let state = await reader.readSelection()
+    let state = await reader.readSelection(context: .finderWasFrontmost)
     XCTAssertEqual(state, .empty)
   }
 
   func testDoesNotExecuteWhenFinderIsNotFrontmost() async {
     let executor = RecordingFinderExecutor(result: .descriptor(Self.list([])))
     let reader = FinderSelectionReader(
-      frontmostBundleID: { "com.example.other" },
       execute: { executor.execute() }
     )
 
-    let state = await reader.readSelection()
+    let state = await reader.readSelection(context: .otherAppWasFrontmost)
     XCTAssertEqual(state, .unavailable)
     XCTAssertEqual(executor.callCount, 0)
   }
 
   func testMapsAutomationDenialToPermissionDenied() async {
     let reader = FinderSelectionReader(
-      frontmostBundleID: { "com.apple.finder" },
       execute: { .failure(-1743) }
     )
 
-    let state = await reader.readSelection()
+    let state = await reader.readSelection(context: .finderWasFrontmost)
     XCTAssertEqual(state, .permissionDenied)
   }
 
   func testMapsUnavailableFinderToUnavailable() async {
     let reader = FinderSelectionReader(
-      frontmostBundleID: { "com.apple.finder" },
       execute: { .failure(-600) }
     )
 
-    let state = await reader.readSelection()
+    let state = await reader.readSelection(context: .finderWasFrontmost)
     XCTAssertEqual(state, .unavailable)
   }
 

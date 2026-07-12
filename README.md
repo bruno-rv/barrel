@@ -61,8 +61,9 @@ or close the panel.
 
 Quick Send can import the files currently selected in Finder. macOS asks for
 Finder Automation permission only when Quick Send first tries to read that
-selection. Barrel doesn't monitor Finder continuously or transmit Finder
-selection data.
+selection. Opening Quick Send doesn't transmit the Finder selection list.
+Barrel doesn't monitor Finder continuously. Files you import enter Barrel's
+normal local storage and may sync through optional CloudKit if you enable it.
 
 Destinations from successful exports remain available in Quick Send for 24
 hours. Quick Send preserves the exact filename when it exports a file. If that

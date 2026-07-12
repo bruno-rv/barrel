@@ -6,7 +6,11 @@ import Testing
 @MainActor
 private final class ActivationSpy: QuickSendActivating {
   var activationCount = 0
-  func activate() { activationCount += 1 }
+  var onActivate: () -> Void = {}
+  func activate() {
+    activationCount += 1
+    onActivate()
+  }
 }
 
 @MainActor
@@ -18,7 +22,21 @@ private final class FocusSchedulerSpy: QuickSendFocusScheduling {
 }
 
 private struct EmptyFinderReader: FinderSelectionReading {
-  func readSelection() async -> FinderSelectionState { .empty }
+  func readSelection(context: FinderSelectionContext) async -> FinderSelectionState { .empty }
+}
+
+private final class FinderExecutionSpy: @unchecked Sendable {
+  private let lock = NSLock()
+  private var count = 0
+
+  func execute() -> FinderAppleEventResult {
+    lock.withLock { count += 1 }
+    let list = NSAppleEventDescriptor.list()
+    list.insert(NSAppleEventDescriptor(fileURL: URL(fileURLWithPath: "/tmp/Selected.txt")), at: 1)
+    return .descriptor(list)
+  }
+
+  var callCount: Int { lock.withLock { count } }
 }
 
 @MainActor
@@ -88,6 +106,53 @@ struct QuickSendPanelControllerTests {
     #expect(focus.lastResponder === searchField)
     #expect(panel.frame.midX == 900)
     #expect(panel.frame.midY == 300)
+    panel.orderOut(nil)
+  }
+
+  @Test func showCapturesFinderEligibilityBeforeActivationAndRefreshUsesCapturedContext() async {
+    var frontmostBundleID = "com.apple.finder"
+    let activation = ActivationSpy()
+    activation.onActivate = { frontmostBundleID = "dev.bruno.Barrel" }
+    let execution = FinderExecutionSpy()
+    let reader = FinderSelectionReader(execute: { execution.execute() })
+    let model = QuickSendModel(
+      finderReader: reader, items: { [] }, history: { [] }, destinations: { [] },
+      isUndoEligible: { _ in false }, performPrimary: { _ in }, dismiss: {}
+    )
+    let panel = QuickSendPanelController.makePanel(contentView: NSView())
+    let controller = QuickSendPanelController(
+      model: model, panel: panel, activator: activation,
+      finderContextProvider: { FinderSelectionContext(frontmostBundleID: frontmostBundleID) }
+    )
+
+    controller.show()
+    while model.finderState == .unavailable { await Task.yield() }
+
+    #expect(execution.callCount == 1)
+    #expect(model.finderState == .selection([URL(fileURLWithPath: "/tmp/Selected.txt")]))
+    #expect(frontmostBundleID == "dev.bruno.Barrel")
+    panel.orderOut(nil)
+  }
+
+  @Test func showDoesNotReadFinderWhenAnotherAppWasFrontmostBeforeActivation() async {
+    let execution = FinderExecutionSpy()
+    let item = ShelfItem(title: "Existing", kind: .file)
+    let model = QuickSendModel(
+      finderReader: FinderSelectionReader(execute: { execution.execute() }),
+      items: { [item] }, history: { [] }, destinations: { [] }, isUndoEligible: { _ in false },
+      performPrimary: { _ in }, dismiss: {}
+    )
+    let panel = QuickSendPanelController.makePanel(contentView: NSView())
+    let controller = QuickSendPanelController(
+      model: model, panel: panel, activator: ActivationSpy(),
+      finderContextProvider: { .otherAppWasFrontmost }
+    )
+
+    controller.show()
+    while model.results.isEmpty { await Task.yield() }
+
+    #expect(execution.callCount == 0)
+    #expect(model.finderState == .unavailable)
     panel.orderOut(nil)
   }
 

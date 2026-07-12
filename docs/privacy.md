@@ -12,7 +12,10 @@ Accessibility access.
 Quick Send asks Finder for the files you currently selected when you open the
 panel. macOS requests Finder Automation permission the first time Quick Send
 needs it. Barrel doesn't monitor Finder continuously, and it doesn't transmit
-Finder selection data.
+the Finder selection list when you open Quick Send. Files you choose to import
+enter Barrel's normal local storage. Like other shelf items, imported files may
+sync through your private CloudKit database if you enable optional CloudKit
+sync.
 
 You can configure the Quick Send shortcut independently from the Shelf
 shortcut. In the Quick Send panel, use the Up and Down Arrow keys to select a

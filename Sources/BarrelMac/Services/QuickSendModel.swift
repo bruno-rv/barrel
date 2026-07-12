@@ -169,11 +169,11 @@ final class QuickSendModel: ObservableObject {
     results.filter { $0.group == group }
   }
 
-  func refresh() async {
+  func refresh(finderContext: FinderSelectionContext = .otherAppWasFrontmost) async {
     refreshGeneration &+= 1
     let generation = refreshGeneration
     let previousSelection = selectedResultID
-    let refreshedFinderState = await finderReader.readSelection()
+    let refreshedFinderState = await finderReader.readSelection(context: finderContext)
     guard generation == refreshGeneration else { return }
     finderState = refreshedFinderState
     currentDestinations = destinations()

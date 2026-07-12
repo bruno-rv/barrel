@@ -525,19 +525,19 @@ struct QuickSendModelTests {
 
 private struct StaticFinderReader: FinderSelectionReading {
   let state: FinderSelectionState
-  func readSelection() async -> FinderSelectionState { state }
+  func readSelection(context: FinderSelectionContext) async -> FinderSelectionState { state }
 }
 
 private actor SequencedFinderReader: FinderSelectionReading {
   private var states: [FinderSelectionState]
   init(states: [FinderSelectionState]) { self.states = states }
-  func readSelection() -> FinderSelectionState { states.removeFirst() }
+  func readSelection(context: FinderSelectionContext) -> FinderSelectionState { states.removeFirst() }
 }
 
 private actor ControlledFinderReader: FinderSelectionReading {
   private var continuations: [CheckedContinuation<FinderSelectionState, Never>] = []
 
-  func readSelection() async -> FinderSelectionState {
+  func readSelection(context: FinderSelectionContext) async -> FinderSelectionState {
     await withCheckedContinuation { continuations.append($0) }
   }
 

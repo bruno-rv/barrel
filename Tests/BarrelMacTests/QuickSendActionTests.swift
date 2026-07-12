@@ -262,7 +262,7 @@ struct QuickSendActionTests {
 
 private struct ActionFinderReader: FinderSelectionReading {
   let state: FinderSelectionState
-  func readSelection() async -> FinderSelectionState { state }
+  func readSelection(context: FinderSelectionContext) async -> FinderSelectionState { state }
 }
 
 private final class AccessState: @unchecked Sendable {

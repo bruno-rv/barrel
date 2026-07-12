@@ -36,6 +36,7 @@ final class QuickSendPanelController: NSObject, NSWindowDelegate {
   private let panel: QuickSendPanel
   private let activator: any QuickSendActivating
   private let focusScheduler: any QuickSendFocusScheduling
+  private let finderContextProvider: () -> FinderSelectionContext
   private let mouseLocation: () -> NSPoint
   private let screenFrames: () -> [NSRect]
   private weak var searchField: NSSearchField?
@@ -47,6 +48,11 @@ final class QuickSendPanelController: NSObject, NSWindowDelegate {
     panel: QuickSendPanel? = nil,
     activator: (any QuickSendActivating)? = nil,
     focusScheduler: (any QuickSendFocusScheduling)? = nil,
+    finderContextProvider: @escaping () -> FinderSelectionContext = {
+      FinderSelectionContext(
+        frontmostBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+      )
+    },
     mouseLocation: @escaping () -> NSPoint = { NSEvent.mouseLocation },
     screenFrames: @escaping () -> [NSRect] = { NSScreen.screens.map(\.visibleFrame) }
   ) {
@@ -54,6 +60,7 @@ final class QuickSendPanelController: NSObject, NSWindowDelegate {
     self.panel = panel ?? Self.makePanel(contentView: NSView())
     self.activator = activator ?? ApplicationQuickSendActivator()
     self.focusScheduler = focusScheduler ?? MainQueueQuickSendFocusScheduler()
+    self.finderContextProvider = finderContextProvider
     self.mouseLocation = mouseLocation
     self.screenFrames = screenFrames
     super.init()
@@ -96,10 +103,11 @@ final class QuickSendPanelController: NSObject, NSWindowDelegate {
   }
 
   func show() {
+    let finderContext = finderContextProvider()
     activator.activate()
     centerOnActiveScreen()
     panel.makeKeyAndOrderFront(nil)
-    Task { await model.refresh() }
+    Task { await model.refresh(finderContext: finderContext) }
     if let searchField { focusScheduler.scheduleFocus(searchField, in: panel) }
   }
 

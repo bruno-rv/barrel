@@ -8,8 +8,17 @@ enum FinderSelectionState: Equatable, Sendable {
   case permissionDenied
 }
 
+enum FinderSelectionContext: Equatable, Sendable {
+  case finderWasFrontmost
+  case otherAppWasFrontmost
+
+  init(frontmostBundleID: String?) {
+    self = frontmostBundleID == "com.apple.finder" ? .finderWasFrontmost : .otherAppWasFrontmost
+  }
+}
+
 protocol FinderSelectionReading: Sendable {
-  func readSelection() async -> FinderSelectionState
+  func readSelection(context: FinderSelectionContext) async -> FinderSelectionState
 }
 
 enum FinderAppleEventResult: @unchecked Sendable {
@@ -182,23 +191,18 @@ struct FinderAppleEventExecutor: @unchecked Sendable {
 }
 
 struct FinderSelectionReader: FinderSelectionReading, Sendable {
-  private let frontmostBundleID: @Sendable () -> String?
   private let execute: @Sendable () -> FinderAppleEventResult
 
   init(
-    frontmostBundleID: @escaping @Sendable () -> String? = {
-      NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-    },
     execute: @escaping @Sendable () -> FinderAppleEventResult = {
       FinderAppleEventExecutor().execute()
     }
   ) {
-    self.frontmostBundleID = frontmostBundleID
     self.execute = execute
   }
 
-  func readSelection() async -> FinderSelectionState {
-    guard frontmostBundleID() == "com.apple.finder" else {
+  func readSelection(context: FinderSelectionContext) async -> FinderSelectionState {
+    guard context == .finderWasFrontmost else {
       return .unavailable
     }
 
