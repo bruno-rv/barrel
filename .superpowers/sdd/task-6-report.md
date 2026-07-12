@@ -49,3 +49,23 @@ passed with zero failures. `git diff --check` also passed.
 The store-backed initializer is ready for the Quick Send panel/controller, but
 that UI composition is outside the four Task 6 source/test files and is not
 present in the current repository.
+
+## Re-review fix
+
+- History Open and Reveal now require the action layer that captured the
+  History result. They resolve that exact semantic ID, verify its History
+  result kind, and never retarget to the current keyboard selection.
+- History actions are blocked while an asynchronous primary operation is
+  running. Layered Escape behavior remains unchanged.
+- Added regressions for opening actions on History A, moving selection to B,
+  and routing both Open and Reveal to A, plus blocking History actions during
+  an in-flight asynchronous primary action.
+
+Focused red runs recorded two failures for each regression before the dispatch
+guard was changed. Fresh focused verification:
+
+```bash
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter 'QuickSend(Model|Action)Tests'
+```
+
+Result: 29 tests across the model and action suites passed with zero failures.

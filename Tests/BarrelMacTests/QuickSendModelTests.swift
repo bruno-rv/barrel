@@ -253,6 +253,69 @@ struct QuickSendModelTests {
     #expect(model.secondaryMode == nil)
   }
 
+  @Test func historyActionsRemainBoundToResultThatOpenedSecondaryMode() async throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let aURL = directory.appendingPathComponent("A")
+    let bURL = directory.appendingPathComponent("B")
+    try Data().write(to: aURL)
+    try Data().write(to: bURL)
+    let a = event(
+      source: "A", timestamp: Date(timeIntervalSince1970: 2), destinationURL: aURL
+    )
+    let b = event(
+      source: "B", timestamp: Date(timeIntervalSince1970: 1), destinationURL: bURL
+    )
+    var opened: [UUID] = []
+    var revealed: [UUID] = []
+    let model = makeModel(
+      history: [a, b],
+      openHistory: { opened.append($0.id); return true },
+      revealHistory: { revealed.append($0.id); return true }
+    )
+    await model.refresh()
+    model.selectedResultID = "history:\(a.id)"
+    model.performSecondary()
+    model.selectedResultID = "history:\(b.id)"
+
+    #expect(model.openSelectedHistory())
+    #expect(model.revealSelectedHistory())
+    #expect(opened == [a.id])
+    #expect(revealed == [a.id])
+  }
+
+  @Test func runningAsyncPrimaryBlocksHistoryActions() async {
+    let history = event(source: "History", timestamp: Date(timeIntervalSince1970: 1))
+    let shelfItem = item("Source", kind: .file)
+    let gate = AsyncActionGate()
+    var opened: [UUID] = []
+    let model = QuickSendModel(
+      finderReader: StaticFinderReader(state: .empty),
+      items: { [shelfItem] }, history: { [history] }, destinations: { [] },
+      isUndoEligible: { _ in false }, performPrimary: { _ in },
+      performAsyncPrimary: { _ in
+        await gate.wait()
+        return .dismiss
+      },
+      openHistory: { opened.append($0.id); return true },
+      dismiss: {}
+    )
+    await model.refresh()
+    model.selectedResultID = "history:\(history.id)"
+    model.performSecondary()
+    model.selectedResultID = "item:\(shelfItem.id)"
+
+    model.performPrimary()
+    #expect(model.isOperationRunning)
+    model.selectedResultID = "history:\(history.id)"
+    #expect(!model.openSelectedHistory())
+    #expect(opened.isEmpty)
+    await gate.resume()
+    while model.isOperationRunning { await Task.yield() }
+  }
+
   @Test func permissionDenialDisablesOnlyFinderImportAndExposesPermissionState() async {
     let model = makeModel(finder: .permissionDenied, items: [item("A", kind: .file)])
     await model.refresh()
@@ -308,13 +371,16 @@ struct QuickSendModelTests {
     destinations: [RecentDestination] = [],
     isUndoEligible: @escaping (HistoryEvent) -> Bool = { _ in false },
     primary: @escaping (QuickSendResult) -> Void = { _ in },
+    openHistory: ((HistoryEvent) -> Bool)? = nil,
+    revealHistory: ((HistoryEvent) -> Bool)? = nil,
     dismiss: @escaping () -> Void = {}
   ) -> QuickSendModel {
     QuickSendModel(
       finderReader: reader ?? StaticFinderReader(state: finder),
       items: { items }, history: { history }, destinations: { destinations },
       isUndoEligible: isUndoEligible,
-      performPrimary: primary, dismiss: dismiss
+      performPrimary: primary, openHistory: openHistory, revealHistory: revealHistory,
+      dismiss: dismiss
     )
   }
 
@@ -369,6 +435,22 @@ private actor ControlledFinderReader: FinderSelectionReading {
 
 private struct TestFailure: LocalizedError {
   var errorDescription: String? { "Failed" }
+}
+
+private actor AsyncActionGate {
+  private var continuation: CheckedContinuation<Void, Never>?
+  private var isReleased = false
+
+  func wait() async {
+    guard !isReleased else { return }
+    await withCheckedContinuation { continuation = $0 }
+  }
+
+  func resume() {
+    isReleased = true
+    continuation?.resume()
+    continuation = nil
+  }
 }
 
 private extension Array {

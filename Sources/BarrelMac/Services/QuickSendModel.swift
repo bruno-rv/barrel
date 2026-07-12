@@ -46,6 +46,8 @@ final class QuickSendModel: ObservableObject {
     isUndoEligible: @escaping (HistoryEvent) -> Bool,
     performPrimary: @escaping (QuickSendResult) -> Void,
     performAsyncPrimary: ((QuickSendResult) async throws -> AsyncActionOutcome)? = nil,
+    openHistory: ((HistoryEvent) -> Bool)? = nil,
+    revealHistory: ((HistoryEvent) -> Bool)? = nil,
     dismiss: @escaping () -> Void
   ) {
     self.finderReader = finderReader
@@ -55,6 +57,8 @@ final class QuickSendModel: ObservableObject {
     self.isUndoEligible = isUndoEligible
     primaryAction = performPrimary
     asyncPrimaryAction = performAsyncPrimary
+    openHistoryAction = openHistory
+    revealHistoryAction = revealHistory
     dismissAction = dismiss
   }
 
@@ -335,9 +339,13 @@ final class QuickSendModel: ObservableObject {
   }
 
   private func performHistoryAction(_ action: ((HistoryEvent) -> Bool)?) -> Bool {
-    guard let action, let selectedResult,
+    guard !isOperationRunning, let action,
+          case let .actions(capturedID) = secondaryMode,
+          let capturedResult = results.first(where: {
+            $0.semanticID == capturedID && $0.group == .history
+          }),
           let event = history().first(where: {
-            selectedResult.semanticID == "history:\($0.id)"
+            capturedResult.semanticID == "history:\($0.id)"
           }) else { return false }
     guard action(event) else {
       inlineError = "The exported file is no longer available."
