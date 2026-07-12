@@ -28,6 +28,9 @@ final class QuickSendModel: ObservableObject {
   private let isUndoEligible: (HistoryEvent) -> Bool
   private let primaryAction: (QuickSendResult) -> Void
   private let dismissAction: () -> Void
+  private var asyncPrimaryAction: ((QuickSendResult) async throws -> Void)?
+  private var openHistoryAction: ((HistoryEvent) -> Bool)?
+  private var revealHistoryAction: ((HistoryEvent) -> Bool)?
   private var refreshGeneration = 0
 
   init(
@@ -46,6 +49,53 @@ final class QuickSendModel: ObservableObject {
     self.isUndoEligible = isUndoEligible
     primaryAction = performPrimary
     dismissAction = dismiss
+  }
+
+  convenience init(
+    store: ShelfStore,
+    finderReader: FinderSelectionReading,
+    destinationResolver: RecentDestinationResolver,
+    dismiss: @escaping () -> Void
+  ) {
+    self.init(
+      finderReader: finderReader,
+      items: { store.items },
+      history: { store.historyEvents },
+      destinations: { destinationResolver.destinations(from: store.historyEvents) },
+      isUndoEligible: { store.isUndoEligible($0) },
+      performPrimary: { _ in },
+      dismiss: dismiss
+    )
+    asyncPrimaryAction = { result in
+      switch result.group {
+      case .finderSelection:
+        let outcome = await store.importURLsForQuickSend(result.finderURLs)
+        if !outcome.failures.isEmpty {
+          throw QuickSendActionError(outcome.failures.map(\.message).joined(separator: "\n"))
+        }
+      case .undoLatest:
+        guard let event = store.historyEvents.first(where: {
+          result.semanticID == "undo:\($0.id)"
+        }) else { throw QuickSendActionError("The export is no longer available for Undo.") }
+        _ = try await store.undoForQuickSend(event)
+      case .temporary:
+        guard let item = store.items.first(where: {
+          result.semanticID == "item:\($0.id)"
+        }) else { throw QuickSendActionError("The shelf item is no longer available.") }
+        guard let destination = destinationResolver.destinations(from: store.historyEvents).first else {
+          throw QuickSendActionError("No recent destination is available.")
+        }
+        _ = try await destinationResolver.withAccess(to: destination) { url in
+          try await store.exportForQuickSend(
+            itemID: item.id, to: url, fileName: item.fileName ?? item.title
+          )
+        }
+      case .history, .destination:
+        throw QuickSendActionError("This result cannot be sent.")
+      }
+    }
+    openHistoryAction = { store.openHistoryEvent($0) }
+    revealHistoryAction = { store.revealHistoryEvent($0) }
   }
 
   var selectedResult: QuickSendResult? {
@@ -110,7 +160,31 @@ final class QuickSendModel: ObservableObject {
   func performPrimary() {
     guard !isOperationRunning, let selectedResult, selectedResult.isPrimaryEnabled else { return }
     inlineError = nil
+    if let asyncPrimaryAction {
+      isOperationRunning = true
+      Task {
+        do {
+          try await asyncPrimaryAction(selectedResult)
+          await refresh()
+          finishOperation(.success(()))
+          dismissAction()
+        } catch {
+          finishOperation(.failure(error))
+        }
+      }
+      return
+    }
     primaryAction(selectedResult)
+  }
+
+  @discardableResult
+  func openSelectedHistory() -> Bool {
+    performHistoryAction(openHistoryAction)
+  }
+
+  @discardableResult
+  func revealSelectedHistory() -> Bool {
+    performHistoryAction(revealHistoryAction)
   }
 
   func performSecondary() {
@@ -240,4 +314,23 @@ final class QuickSendModel: ObservableObject {
   private func normalized(_ value: String) -> String {
     value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
   }
+
+  private func performHistoryAction(_ action: ((HistoryEvent) -> Bool)?) -> Bool {
+    guard let action, let selectedResult,
+          let event = history().first(where: {
+            selectedResult.semanticID == "history:\($0.id)"
+          }) else { return false }
+    guard action(event) else {
+      inlineError = "The exported file is no longer available."
+      return false
+    }
+    inlineError = nil
+    return true
+  }
+}
+
+private struct QuickSendActionError: LocalizedError {
+  let message: String
+  init(_ message: String) { self.message = message }
+  var errorDescription: String? { message }
 }

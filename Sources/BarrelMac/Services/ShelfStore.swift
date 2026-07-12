@@ -10,6 +10,13 @@ enum ShelfViewMode: Hashable {
   case trash
 }
 
+struct ShelfUndoOutcome: Equatable, Sendable {
+  let event: HistoryEvent
+  let warning: String?
+
+  var isCommitted: Bool { true }
+}
+
 @MainActor
 final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
   @Published private(set) var items: [ShelfItem] = []
@@ -80,15 +87,30 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
 
   func performUndo(_ event: HistoryEvent) async {
     do {
-      _ = try await repository.undo(historyEventID: event.id)
+      let outcome = try await undoForQuickSend(event)
+      errorMessage = outcome.warning
+    } catch {
+      errorMessage = Self.undoMessage(for: error)
+    }
+  }
+
+  func undoForQuickSend(_ event: HistoryEvent) async throws -> ShelfUndoOutcome {
+    do {
+      let undoEvent = try await repository.undo(historyEventID: event.id)
       notifyRepositoryChange()
       await refresh()
+      return ShelfUndoOutcome(event: undoEvent, warning: nil)
     } catch RepositoryError.undoCleanupFailed(let recovery) {
       notifyRepositoryChange()
       await refresh()
-      errorMessage = Self.undoMessage(for: RepositoryError.undoCleanupFailed(recovery: recovery))
-    } catch {
-      errorMessage = Self.undoMessage(for: error)
+      let warning = Self.undoMessage(
+        for: RepositoryError.undoCleanupFailed(recovery: recovery)
+      )
+      errorMessage = warning
+      guard let undoEvent = historyEvents.first(where: { $0.reversedEventID == event.id }) else {
+        throw RepositoryError.undoCleanupFailed(recovery: recovery)
+      }
+      return ShelfUndoOutcome(event: undoEvent, warning: warning)
     }
   }
 
@@ -128,12 +150,19 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
   func importURLs(_ urls: [URL]) {
     Task {
       isImporting = true
-      let outcome = await repository.importFiles(urls, origin: .imported, expiresAt: nil)
+      let outcome = await importURLsForQuickSend(urls)
       isImporting = false
       report(errors: outcome.failures.map(\.message))
-      if !outcome.successes.isEmpty { notifyRepositoryChange() }
+    }
+  }
+
+  func importURLsForQuickSend(_ urls: [URL]) async -> ImportOutcome {
+    let outcome = await repository.importFiles(urls, origin: .imported, expiresAt: nil)
+    if !outcome.successes.isEmpty {
+      notifyRepositoryChange()
       await refresh(preferredSelection: outcome.successes.first?.id)
     }
+    return outcome
   }
 
   func importProviders(_ providers: [NSItemProvider]) {
@@ -355,6 +384,20 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
     }
   }
 
+  @discardableResult
+  func openHistoryEvent(_ event: HistoryEvent) -> Bool {
+    guard let url = existingDestinationURL(for: event) else { return false }
+    NSWorkspace.shared.open(url)
+    return true
+  }
+
+  @discardableResult
+  func revealHistoryEvent(_ event: HistoryEvent) -> Bool {
+    guard let url = existingDestinationURL(for: event) else { return false }
+    NSWorkspace.shared.activateFileViewerSelecting([url])
+    return true
+  }
+
   func itemProvider(for item: ShelfItem) -> NSItemProvider {
     if let url = fileURL(for: item) {
       return NSItemProvider(contentsOf: url) ?? NSItemProvider(object: url as NSURL)
@@ -366,6 +409,12 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
   }
 
   func export(itemID: UUID, to directoryURL: URL, fileName: String) async throws -> HistoryEvent {
+    try await exportForQuickSend(itemID: itemID, to: directoryURL, fileName: fileName)
+  }
+
+  func exportForQuickSend(
+    itemID: UUID, to directoryURL: URL, fileName: String
+  ) async throws -> HistoryEvent {
     do {
       let event = try await repository.export(itemID: itemID, to: directoryURL, fileName: fileName)
       notifyRepositoryChange()
@@ -528,6 +577,12 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
     if !errors.isEmpty {
       errorMessage = errors.joined(separator: "\n")
     }
+  }
+
+  private func existingDestinationURL(for event: HistoryEvent) -> URL? {
+    guard let url = event.destinationURL,
+          FileManager.default.fileExists(atPath: url.path) else { return nil }
+    return url
   }
 
   private func notifyRepositoryChange() {

@@ -231,6 +231,21 @@ final class ShelfStoreHistoryTests: XCTestCase {
     XCTAssertEqual(store.errorMessage, "Undo was saved, but its recovery bytes could not be removed.")
   }
 
+  func testResultReturningUndoReportsCommittedCleanupWarning() async throws {
+    let manager = UndoCleanupFailureFileManager()
+    let fixture = try await Fixture(fileManager: manager)
+    let export = try await fixture.export(fileName: "Cleanup Result.txt")
+    let store = ShelfStore(repository: fixture.repository, indexesSpotlight: false, loadOnInit: false)
+    await store.refresh()
+    manager.failUndoCleanup = true
+
+    let outcome = try await store.undoForQuickSend(export)
+
+    XCTAssertTrue(outcome.isCommitted)
+    XCTAssertEqual(outcome.warning, "Undo was saved, but its recovery bytes could not be removed.")
+    XCTAssertEqual(store.liveItemCount, 1)
+  }
+
   func testUndoConflictMessagesAreSpecific() throws {
     let url = URL(fileURLWithPath: "/tmp/Export.txt")
     let recovery = URL(fileURLWithPath: "/tmp/Recovery.txt")
