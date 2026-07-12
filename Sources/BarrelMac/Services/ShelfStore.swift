@@ -458,6 +458,11 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
       visibleItems.lazy.filter { $0.trashedAt == nil && $0.deletedAt == nil }.map(\.id)
     )
     selectedIDs.formIntersection(liveVisibleIDs)
+    if viewMode == .history {
+      selectedIDs = []
+      selectedItemID = nil
+      return
+    }
     if let preferredSelection, visibleIDs.contains(preferredSelection) {
       selectedItemID = preferredSelection
     } else if selectedItemID.map(visibleIDs.contains) != true {

@@ -47,6 +47,25 @@ final class ShelfStoreHistoryTests: XCTestCase {
     XCTAssertTrue(store.selectedIDs.isEmpty)
   }
 
+  func testHistoryRefreshAndUndoKeepBucketSelectionEmpty() async throws {
+    let fixture = try await Fixture()
+    let export = try await fixture.export(fileName: "History.txt")
+    let store = ShelfStore(repository: fixture.repository, indexesSpotlight: false, loadOnInit: false)
+    await store.refresh()
+    store.openHistory()
+
+    await store.refresh()
+
+    XCTAssertNil(store.selectedItemID)
+    XCTAssertTrue(store.selectedIDs.isEmpty)
+
+    fixture.advance(by: 1)
+    await store.performUndo(export)
+
+    XCTAssertNil(store.selectedItemID)
+    XCTAssertTrue(store.selectedIDs.isEmpty)
+  }
+
   func testRefreshPrunesHistoryAfterTwentyFourHours() async throws {
     let fixture = try await Fixture()
     _ = try await fixture.export(fileName: "Expired.txt")
@@ -79,6 +98,7 @@ final class ShelfStoreHistoryTests: XCTestCase {
     let store = ShelfStore(repository: fixture.repository, indexesSpotlight: false, loadOnInit: false)
     await store.refresh()
     manager.failUndoCleanup = true
+    fixture.advance(by: 1)
 
     await store.performUndo(export)
 
