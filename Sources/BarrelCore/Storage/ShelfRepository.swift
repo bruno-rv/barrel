@@ -537,12 +537,14 @@ public actor ShelfRepository {
       permanentlyRemovedIDs.contains(item.id) ? tombstone(for: item, at: now) : item
     }
     let sizes = physicalBytesByItemID(updated, now: now)
+    let physicalUsage = try storageUsage()
     let candidates = Set(
       RetentionPolicy().cleanupCandidates(
         items: updated.filter { !exportedItemIDs.contains($0.id) },
         now: now,
         bytesByItemID: sizes,
-        quotaBytes: quotaBytes
+        quotaBytes: quotaBytes,
+        physicalUsageBytes: physicalUsage
       )
     )
     for index in updated.indices

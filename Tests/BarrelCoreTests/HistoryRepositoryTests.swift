@@ -83,6 +83,38 @@ final class HistoryRepositoryTests: XCTestCase {
     XCTAssertEqual(temporary.map(\.id), [fixture.item.id])
   }
 
+  func testCleanupCountsProtectedExportBytesWhenEvictingEligibleClipboardItem() async throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("HistoryCleanupTests-\(UUID())", isDirectory: true)
+    let destination = root.appendingPathComponent("Exports", isDirectory: true)
+    let importedSource = root.appendingPathComponent("imported.txt")
+    let clipboardSource = root.appendingPathComponent("clipboard.txt")
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+    try Data("123456".utf8).write(to: importedSource)
+    try Data("abcdef".utf8).write(to: clipboardSource)
+    let repository = ShelfRepository(configuration: RepositoryConfiguration(
+      rootURL: root.appendingPathComponent("Repository", isDirectory: true),
+      deviceID: "test-mac",
+      quotaBytes: 6
+    ))
+    let importedOutcome = await repository.importFiles([importedSource], origin: .imported, expiresAt: nil)
+    let imported = try XCTUnwrap(importedOutcome.successes.first)
+    let clipboardOutcome = await repository.importFiles([clipboardSource], origin: .clipboard, expiresAt: nil)
+    let clipboard = try XCTUnwrap(clipboardOutcome.successes.first)
+    let export = try await repository.export(itemID: imported.id, to: destination)
+
+    let outcome = try await repository.cleanup()
+
+    let snapshot = await repository.snapshot()
+    XCTAssertNotNil(snapshot.first(where: { $0.id == clipboard.id })?.trashedAt)
+    XCTAssertEqual(outcome.physicalUsageBytes, 12)
+    XCTAssertTrue(outcome.requiresManualCleanup)
+    _ = try await repository.undo(historyEventID: export.id)
+    let temporary = try await repository.temporarySnapshot()
+    XCTAssertEqual(temporary.map(\.id), [imported.id])
+  }
+
   func testUndoSnapshotBytesAreDeletedWhenHistoryExpires() async throws {
     let clock = TestHistoryClock(Date(timeIntervalSince1970: 1_800_000_000))
     let fixture = try ExportFixture(

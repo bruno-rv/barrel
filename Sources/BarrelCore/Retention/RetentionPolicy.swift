@@ -31,10 +31,11 @@ public struct RetentionPolicy: Sendable {
     items: [ShelfItem],
     now: Date,
     bytesByItemID: [UUID: Int64],
-    quotaBytes: Int64
+    quotaBytes: Int64,
+    physicalUsageBytes: Int64? = nil
   ) -> [UUID] {
     let liveItems = items.filter { $0.trashedAt == nil && $0.deletedAt == nil }
-    var projectedBytes = liveItems.reduce(Int64(0)) { total, item in
+    var projectedBytes = physicalUsageBytes ?? liveItems.reduce(Int64(0)) { total, item in
       total + max(bytesByItemID[item.id] ?? 0, 0)
     }
     var candidates: [UUID] = []
