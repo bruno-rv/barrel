@@ -1,8 +1,50 @@
 import AppKit
 import SwiftUI
 
-private enum QuickSendCommand {
+enum QuickSendCommand {
   case up, down, primary, secondary, escape
+}
+
+final class QuickSendSearchFieldCoordinator: NSObject, NSSearchFieldDelegate {
+  var setText: (String) -> Void
+  var command: (QuickSendCommand) -> Void
+  private let modifierFlags: () -> NSEvent.ModifierFlags
+
+  init(
+    setText: @escaping (String) -> Void,
+    command: @escaping (QuickSendCommand) -> Void,
+    modifierFlags: @escaping () -> NSEvent.ModifierFlags = {
+      NSApp.currentEvent?.modifierFlags ?? NSEvent.modifierFlags
+    }
+  ) {
+    self.setText = setText
+    self.command = command
+    self.modifierFlags = modifierFlags
+  }
+
+  func controlTextDidChange(_ notification: Notification) {
+    guard let field = notification.object as? NSSearchField else { return }
+    setText(field.stringValue)
+  }
+
+  func control(
+    _ control: NSControl,
+    textView: NSTextView,
+    doCommandBy commandSelector: Selector
+  ) -> Bool {
+    let mapped: QuickSendCommand?
+    switch commandSelector {
+    case #selector(NSResponder.moveUp(_:)): mapped = .up
+    case #selector(NSResponder.moveDown(_:)): mapped = .down
+    case #selector(NSResponder.insertNewline(_:)):
+      mapped = modifierFlags().contains(.command) ? .secondary : .primary
+    case #selector(NSResponder.cancelOperation(_:)): mapped = .escape
+    default: mapped = nil
+    }
+    guard let mapped else { return false }
+    command(mapped)
+    return true
+  }
 }
 
 struct QuickSendView: View {
@@ -133,44 +175,26 @@ private struct QuickSendSearchField: NSViewRepresentable {
   let register: (NSSearchField) -> Void
   let command: (QuickSendCommand) -> Void
 
-  func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
+  func makeCoordinator() -> QuickSendSearchFieldCoordinator {
+    let binding = $text
+    return QuickSendSearchFieldCoordinator(
+      setText: { binding.wrappedValue = $0 },
+      command: command
+    )
+  }
 
   func makeNSView(context: Context) -> NSSearchField {
-    let field = CommandSearchField()
+    let field = NSSearchField()
     field.placeholderString = "Search shelf, History, and destinations"
     field.delegate = context.coordinator
-    field.command = command
     register(field)
     return field
   }
 
   func updateNSView(_ field: NSSearchField, context: Context) {
     if field.stringValue != text { field.stringValue = text }
-    (field as? CommandSearchField)?.command = command
-    context.coordinator.parent = self
-  }
-
-  final class Coordinator: NSObject, NSSearchFieldDelegate {
-    var parent: QuickSendSearchField
-    init(parent: QuickSendSearchField) { self.parent = parent }
-    func controlTextDidChange(_ notification: Notification) {
-      guard let field = notification.object as? NSSearchField else { return }
-      parent.text = field.stringValue
-    }
-  }
-
-  final class CommandSearchField: NSSearchField {
-    var command: ((QuickSendCommand) -> Void)?
-    override func keyDown(with event: NSEvent) {
-      let mapped: QuickSendCommand?
-      switch event.keyCode {
-      case 126: mapped = .up
-      case 125: mapped = .down
-      case 36, 76: mapped = event.modifierFlags.contains(.command) ? .secondary : .primary
-      case 53: mapped = .escape
-      default: mapped = nil
-      }
-      if let mapped { command?(mapped) } else { super.keyDown(with: event) }
-    }
+    let binding = $text
+    context.coordinator.setText = { binding.wrappedValue = $0 }
+    context.coordinator.command = command
   }
 }

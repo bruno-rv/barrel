@@ -43,6 +43,27 @@ struct QuickSendPanelControllerTests {
     #expect(!panel.styleMask.contains(.nonactivatingPanel))
   }
 
+  @Test func searchFieldDelegateRoutesEditingCommandsAndFallsBackForOrdinaryEditing() {
+    var commands: [QuickSendCommand] = []
+    var modifiers: NSEvent.ModifierFlags = []
+    let coordinator = QuickSendSearchFieldCoordinator(
+      setText: { _ in },
+      command: { commands.append($0) },
+      modifierFlags: { modifiers }
+    )
+    let field = NSSearchField()
+    let editor = NSTextView()
+
+    #expect(coordinator.control(field, textView: editor, doCommandBy: #selector(NSResponder.moveUp(_:))))
+    #expect(coordinator.control(field, textView: editor, doCommandBy: #selector(NSResponder.moveDown(_:))))
+    #expect(coordinator.control(field, textView: editor, doCommandBy: #selector(NSResponder.insertNewline(_:))))
+    modifiers = .command
+    #expect(coordinator.control(field, textView: editor, doCommandBy: #selector(NSResponder.insertNewline(_:))))
+    #expect(coordinator.control(field, textView: editor, doCommandBy: #selector(NSResponder.cancelOperation(_:))))
+    #expect(!coordinator.control(field, textView: editor, doCommandBy: #selector(NSResponder.insertTab(_:))))
+    #expect(commands == [.up, .down, .primary, .secondary, .escape])
+  }
+
   @Test func showReusesPanelActivatesEveryTimeCentersOnPointerScreenAndSchedulesFocus() {
     let activation = ActivationSpy()
     let focus = FocusSchedulerSpy()
