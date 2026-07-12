@@ -105,6 +105,29 @@ final class ShelfStoreHistoryTests: XCTestCase {
     XCTAssertFalse(FileManager.default.fileExists(atPath: export.destinationURL!.path))
   }
 
+  func testRemoteTombstoneUndoRefreshDisplaysLiveTemporaryOverlayWithoutChangingSync() async throws {
+    let fixture = try await Fixture()
+    let export = try await fixture.export(fileName: "Overlay.txt")
+    let tombstone = try await fixture.applyRemoteTombstone(after: export)
+    let store = ShelfStore(repository: fixture.repository, indexesSpotlight: false, loadOnInit: false)
+
+    await store.performUndo(export)
+
+    let displayed = try XCTUnwrap(store.items.first)
+    XCTAssertEqual(displayed.id, export.itemID)
+    XCTAssertNil(displayed.deletedAt)
+    XCTAssertEqual(displayed.fileName, "Source.txt")
+    XCTAssertEqual(store.liveItemCount, 1)
+    XCTAssertEqual(store.visibleItems.map(\.id), [export.itemID])
+    let displayedURL = try XCTUnwrap(store.fileURL(for: displayed))
+    XCTAssertTrue(FileManager.default.fileExists(atPath: displayedURL.path))
+    XCTAssertFalse(store.isCanonicalMutationEligible(displayed))
+    store.setPinned(displayed, isPinned: true)
+    await Task.yield()
+    let sync = try await fixture.repository.syncRecords()
+    XCTAssertEqual(sync.map(\.item), [tombstone])
+  }
+
   func testCleanupFailedUndoRefreshesCommittedStateAndShowsWarning() async throws {
     let manager = UndoCleanupFailureFileManager()
     let fixture = try await Fixture(fileManager: manager)
@@ -220,6 +243,20 @@ private final class Fixture: @unchecked Sendable {
   }
 
   func advance(by interval: TimeInterval) { clock.now.addTimeInterval(interval) }
+
+  func applyRemoteTombstone(after export: HistoryEvent) async throws -> ShelfItem {
+    let snapshot = await repository.snapshot()
+    var tombstone = try XCTUnwrap(snapshot.first)
+    tombstone.title = "Deleted Item"
+    tombstone.fileName = nil
+    tombstone.relativePath = nil
+    tombstone.contentHash = nil
+    tombstone.deletedAt = export.timestamp.addingTimeInterval(1)
+    tombstone.updatedAt = tombstone.deletedAt!
+    tombstone.revision += 1
+    try await repository.applySyncRecords([SyncRecord(item: tombstone)])
+    return tombstone
+  }
 
   static func unloadedRepository() -> ShelfRepository {
     ShelfRepository(configuration: RepositoryConfiguration(

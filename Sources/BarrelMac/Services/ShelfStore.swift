@@ -29,6 +29,7 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
   private let indexesSpotlight: Bool
   private let spotlightIndexer = SpotlightIndexer()
   private var fileURLsByItemID: [UUID: URL] = [:]
+  private var localOverlayItemIDs: Set<UUID> = []
   private var clipboardTask: Task<Void, Never>?
   private var spotlightTask: Task<Void, Never>?
   private var lastPasteboardChangeCount = NSPasteboard.general.changeCount
@@ -209,7 +210,7 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
 
   func stackSelectedItems() {
     let ids = Array(selectedIDs)
-    guard ids.count > 1 else { return }
+    guard ids.count > 1, localOverlayItemIDs.isDisjoint(with: ids) else { return }
     Task {
       do {
         let stack = try await repository.stack(ids: ids)
@@ -223,6 +224,7 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
   }
 
   func splitStack(_ stack: ShelfItem) {
+    guard isCanonicalMutationEligible(stack) else { return }
     Task {
       do {
         try await repository.split(id: stack.id)
@@ -235,6 +237,7 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
   }
 
   func rename(_ item: ShelfItem, title: String) {
+    guard isCanonicalMutationEligible(item) else { return }
     Task {
       do {
         try await repository.rename(id: item.id, title: title)
@@ -247,6 +250,7 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
   }
 
   func setPinned(_ item: ShelfItem, isPinned: Bool) {
+    guard isCanonicalMutationEligible(item) else { return }
     Task {
       do {
         try await repository.setPinned(id: item.id, isPinned: isPinned)
@@ -259,6 +263,7 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
   }
 
   func setExpiration(_ item: ShelfItem, preset: ShelfExpirationPreset) {
+    guard isCanonicalMutationEligible(item) else { return }
     Task {
       do {
         try await repository.setExpiration(id: item.id, date: preset.expirationDate(from: .now))
@@ -279,6 +284,7 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
   }
 
   func restore(_ item: ShelfItem) {
+    guard isCanonicalMutationEligible(item) else { return }
     Task {
       do {
         try await repository.restore(ids: [item.id])
@@ -303,6 +309,7 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
   }
 
   func deletePermanently(_ item: ShelfItem) {
+    guard isCanonicalMutationEligible(item) else { return }
     Task {
       do {
         try await repository.deletePermanently(ids: [item.id])
@@ -359,6 +366,9 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
   }
 
   func export(itemID: UUID, to directoryURL: URL, fileName: String) async throws -> HistoryEvent {
+    guard !localOverlayItemIDs.contains(itemID) else {
+      throw RepositoryError.itemNotFound(itemID)
+    }
     do {
       let event = try await repository.export(itemID: itemID, to: directoryURL, fileName: fileName)
       notifyRepositoryChange()
@@ -400,8 +410,11 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
     let history = (try? await repository.historySnapshot()) ?? []
     let snapshot = await repository.snapshot()
     let temporaryItemIDs = Set(temporaryItems.map(\.id))
-    let displayedSnapshot = snapshot.filter {
-      temporaryItemIDs.contains($0.id) || ($0.trashedAt != nil && $0.deletedAt == nil)
+    let overlayItemIDs = Set(snapshot.lazy.filter {
+      temporaryItemIDs.contains($0.id) && $0.deletedAt != nil
+    }.map(\.id))
+    let displayedSnapshot = temporaryItems + snapshot.filter {
+      !temporaryItemIDs.contains($0.id) && $0.trashedAt != nil && $0.deletedAt == nil
     }
     var resolvedURLs: [UUID: URL] = [:]
     for item in displayedSnapshot {
@@ -415,6 +428,7 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
     items = displayedSnapshot
     historyEvents = history
     fileURLsByItemID = resolvedURLs
+    localOverlayItemIDs = overlayItemIDs
     storageUsage = usage
     recomputeVisibleItems(preferredSelection: preferredSelection)
     if indexesSpotlight {
@@ -492,6 +506,7 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
   }
 
   private func trash(ids: [UUID]) {
+    let ids = ids.filter { !localOverlayItemIDs.contains($0) }
     guard !ids.isEmpty else { return }
     Task {
       do {
@@ -513,6 +528,10 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
 
   private func notifyRepositoryChange() {
     NotificationCenter.default.post(name: .repositoryDidChange, object: self)
+  }
+
+  func isCanonicalMutationEligible(_ item: ShelfItem) -> Bool {
+    !localOverlayItemIDs.contains(item.id)
   }
 
   private func report(cleanup outcome: CleanupOutcome) {
