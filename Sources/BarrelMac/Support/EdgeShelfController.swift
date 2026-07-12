@@ -207,7 +207,7 @@ final class EdgeShelfController {
 
     if autoHideChanged {
       cancelReveal()
-      cancelMinimumVisibility()
+      if !newAutoHide { cancelMinimumVisibility() }
       let point = mouseLocation()
       apply(machine.handle(.autoHideChanged(
         isEnabled: newAutoHide,

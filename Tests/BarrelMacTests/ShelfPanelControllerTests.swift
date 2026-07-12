@@ -208,6 +208,38 @@ final class ShelfPanelControllerTests: XCTestCase {
   }
 
   @MainActor
+  func testReenablingAutoHideOutsideWaitsForMinimumVisibilityDeadline() {
+    let defaults = makeDefaults()
+    let panel = ShelfPanelController.makePanel(contentView: NSView())
+    let screen = ShelfScreen(
+      displayID: 1,
+      frame: NSRect(x: 0, y: 0, width: 600, height: 700),
+      visibleFrame: NSRect(x: 0, y: 0, width: 600, height: 680),
+      isMain: true
+    )
+    let scheduler = TestEdgeShelfScheduler()
+    let point = NSPoint(x: screen.frame.midX, y: screen.frame.midY)
+    let controller = EdgeShelfController(
+      panel: panel,
+      defaults: defaults,
+      mouseLocation: { point },
+      screens: { [screen] },
+      scheduler: scheduler
+    )
+    controller.start()
+    defer { controller.stop() }
+
+    XCTAssertTrue(panel.frame.intersects(screen.frame))
+    defaults.set(true, forKey: ShelfWindowPreferences.autoHideKey)
+    controller.settingsDidChange()
+
+    scheduler.advance(by: 2.999)
+    XCTAssertTrue(panel.frame.intersects(screen.frame))
+    scheduler.advance(by: 0.001)
+    XCTAssertFalse(panel.frame.intersects(screen.frame))
+  }
+
+  @MainActor
   func testChangingEdgeImmediatelyRecomputesShownFrame() {
     let defaults = makeDefaults()
     let panel = ShelfPanelController.makePanel(contentView: NSView())
@@ -356,17 +388,18 @@ final class ShelfPanelControllerTests: XCTestCase {
   }
 
   @MainActor
-  func testEdgeOnlyChangeDoesNotStrandPendingHide() async throws {
+  func testEdgeOnlyChangeDoesNotStrandPendingHide() {
     let defaults = makeDefaults()
     let panel = ShelfPanelController.makePanel(contentView: NSView())
-    let controller = EdgeShelfController(panel: panel, defaults: defaults)
+    let scheduler = TestEdgeShelfScheduler()
+    let controller = EdgeShelfController(panel: panel, defaults: defaults, scheduler: scheduler)
     controller.start()
     defaults.set(true, forKey: ShelfWindowPreferences.autoHideKey)
     controller.settingsDidChange()
     defaults.set(ShelfEdge.right.rawValue, forKey: ShelfWindowPreferences.edgeKey)
     controller.settingsDidChange()
 
-    try await Task.sleep(for: .milliseconds(300))
+    scheduler.advance(by: 3.0)
 
     XCTAssertFalse(panel.frame.intersects(NSScreen.main!.frame))
     controller.stop()

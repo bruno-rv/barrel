@@ -133,16 +133,27 @@ struct EdgeShelfStateMachine {
       return [.show, .scheduleMinimumVisibility]
     case (.dragLocked, .explicitShow):
       return [.show]
-    case (.revealPending, .autoHideChanged(isEnabled: false, pointerInside: _)):
+    case (.revealPending, .autoHideChanged(isEnabled: false, pointerInside: let pointerInside)):
       phase = .shown
-      return [.cancelReveal, .show]
-    case (.hidePending, .autoHideChanged(isEnabled: false, pointerInside: _)):
+      isMinimumVisibilityElapsed = false
+      isPointerInsidePanel = pointerInside
+      return [.cancelReveal, .show, .scheduleMinimumVisibility]
+    case (.hidePending, .autoHideChanged(isEnabled: false, pointerInside: let pointerInside)):
       phase = .shown
-      return [.cancelHide, .show]
-    case (.hidden, .autoHideChanged(isEnabled: false, pointerInside: _)):
+      isMinimumVisibilityElapsed = false
+      isPointerInsidePanel = pointerInside
+      return [.cancelHide, .show, .scheduleMinimumVisibility]
+    case (.hidden, .autoHideChanged(isEnabled: false, pointerInside: let pointerInside)):
       phase = .shown
-      return [.show]
+      isMinimumVisibilityElapsed = false
+      isPointerInsidePanel = pointerInside
+      return [.show, .scheduleMinimumVisibility]
     case (.shown, .autoHideChanged(isEnabled: true, pointerInside: false)):
+      isPointerInsidePanel = false
+      if !isMinimumVisibilityElapsed {
+        hasPendingHide = true
+        return [.rememberPendingHide]
+      }
       phase = .hidePending
       return [.scheduleHide]
     default:
