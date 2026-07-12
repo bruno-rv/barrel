@@ -25,14 +25,17 @@ final class QuickSendModel: ObservableObject {
   private let items: () -> [ShelfItem]
   private let history: () -> [HistoryEvent]
   private let destinations: () -> [RecentDestination]
+  private let isUndoEligible: (HistoryEvent) -> Bool
   private let primaryAction: (QuickSendResult) -> Void
   private let dismissAction: () -> Void
+  private var refreshGeneration = 0
 
   init(
     finderReader: FinderSelectionReading,
     items: @escaping () -> [ShelfItem],
     history: @escaping () -> [HistoryEvent],
     destinations: @escaping () -> [RecentDestination],
+    isUndoEligible: @escaping (HistoryEvent) -> Bool,
     performPrimary: @escaping (QuickSendResult) -> Void,
     dismiss: @escaping () -> Void
   ) {
@@ -40,6 +43,7 @@ final class QuickSendModel: ObservableObject {
     self.items = items
     self.history = history
     self.destinations = destinations
+    self.isUndoEligible = isUndoEligible
     primaryAction = performPrimary
     dismissAction = dismiss
   }
@@ -57,8 +61,12 @@ final class QuickSendModel: ObservableObject {
   }
 
   func refresh() async {
+    refreshGeneration &+= 1
+    let generation = refreshGeneration
     let previousSelection = selectedResultID
-    finderState = await finderReader.readSelection()
+    let refreshedFinderState = await finderReader.readSelection()
+    guard generation == refreshGeneration else { return }
+    finderState = refreshedFinderState
 
     let candidates = finderResults()
       + undoResults()
@@ -137,11 +145,12 @@ final class QuickSendModel: ObservableObject {
       guard !urls.isEmpty else { return [] }
       let paths = urls.map { $0.standardizedFileURL.path }
       return [QuickSendResult(
-        semanticID: "finder:\(paths.joined(separator: "|"))",
+        semanticID: "finder:\(paths.sorted().joined(separator: "|"))",
         group: .finderSelection,
         title: urls.count == 1 ? urls[0].lastPathComponent : "\(urls.count) Finder Items",
         subtitle: "Finder Selection",
         searchTerms: paths,
+        finderURLs: urls,
         isPrimaryEnabled: true
       )]
     case .permissionDenied:
@@ -157,7 +166,7 @@ final class QuickSendModel: ObservableObject {
 
   private func undoResults() -> [QuickSendResult] {
     guard let event = history()
-      .filter({ $0.kind == .export && $0.reversedByEventID == nil })
+      .filter(isUndoEligible)
       .max(by: { $0.timestamp < $1.timestamp })
     else { return [] }
     return [QuickSendResult(

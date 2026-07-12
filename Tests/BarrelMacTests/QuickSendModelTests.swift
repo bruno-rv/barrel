@@ -15,8 +15,8 @@ struct QuickSendModelTests {
       bookmark: nil, lastUsedAt: now
     )
     let model = makeModel(
-      finder: .selection([URL(fileURLWithPath: "/Report.pdf")]),
-      items: [annual, report], history: [history], destinations: [destination]
+      finder: .selection([URL(fileURLWithPath: "/Report.pdf")]), items: [annual, report],
+      history: [history], destinations: [destination], isUndoEligible: { $0.id == history.id }
     )
 
     model.query = "rep"
@@ -74,19 +74,40 @@ struct QuickSendModelTests {
     ])
   }
 
-  @Test func undoUsesLatestEligibleExportAndReverseEventsAreInformational() async {
+  @Test func undoUsesOnlyAuthoritativelyEligibleEventAndReverseEventsAreInformational() async {
     let now = Date(timeIntervalSince1970: 10)
-    let older = event(source: "Older", timestamp: now.addingTimeInterval(-2))
-    let reversedID = UUID()
-    let newer = event(source: "Newer", timestamp: now, reversedBy: reversedID)
-    let reverse = event(kind: .undo, source: "Newer", timestamp: now.addingTimeInterval(1), reversed: newer.id)
-    let model = makeModel(history: [older, newer, reverse])
+    let stale = event(source: "Stale", timestamp: now.addingTimeInterval(-5))
+    let expired = event(source: "Expired", timestamp: now.addingTimeInterval(-4))
+    let valid = event(source: "Valid", timestamp: now.addingTimeInterval(-3))
+    let nonlatest = event(source: "Nonlatest", timestamp: now.addingTimeInterval(-2))
+    let removed = event(source: "Removed", timestamp: now.addingTimeInterval(-1))
+    let reverse = event(kind: .undo, source: "Removed", timestamp: now, reversed: removed.id)
+    let eligibility = [
+      stale.id: false,
+      expired.id: false,
+      valid.id: true,
+      nonlatest.id: false,
+      removed.id: false,
+    ]
+    let model = makeModel(
+      history: [stale, expired, valid, nonlatest, removed, reverse],
+      isUndoEligible: { eligibility[$0.id] == true }
+    )
 
     await model.refresh()
 
-    #expect(model.resultsInGroup(.undoLatest).single?.semanticID == "undo:\(older.id)")
-    #expect(model.resultsInGroup(.history).count == 3)
+    #expect(model.resultsInGroup(.undoLatest).single?.semanticID == "undo:\(valid.id)")
+    #expect(model.resultsInGroup(.history).count == 6)
     #expect(model.resultsInGroup(.history).first?.isPrimaryEnabled == false)
+  }
+
+  @Test func undoIsAbsentWhenAuthoritativeCallerMarksEveryEventIneligible() async {
+    let candidate = event(source: "Candidate", timestamp: Date(timeIntervalSince1970: 10))
+    let model = makeModel(history: [candidate], isUndoEligible: { _ in false })
+
+    await model.refresh()
+
+    #expect(model.resultsInGroup(.undoLatest).isEmpty)
   }
 
   @Test func semanticIDsAndSelectionSurviveAsyncFinderRefresh() async {
@@ -106,11 +127,49 @@ struct QuickSendModelTests {
     #expect(model.resultsInGroup(.temporary).single?.id == stableID)
   }
 
+  @Test func olderFinderCompletionCannotOverwriteNewerRefresh() async {
+    let reader = ControlledFinderReader()
+    let model = makeModel(reader: reader)
+
+    let olderRefresh = Task { await model.refresh() }
+    await reader.waitForRequestCount(1)
+    let newerRefresh = Task { await model.refresh() }
+    await reader.waitForRequestCount(2)
+
+    await reader.completeRequest(at: 1, with: .selection([URL(fileURLWithPath: "/Newer")]))
+    await newerRefresh.value
+    await reader.completeRequest(at: 0, with: .selection([URL(fileURLWithPath: "/Older")]))
+    await olderRefresh.value
+
+    #expect(model.finderState == .selection([URL(fileURLWithPath: "/Newer")]))
+    #expect(model.resultsInGroup(.finderSelection).single?.title == "Newer")
+  }
+
+  @Test func reorderedFinderSetKeepsSelectionIdentityAndProviderURLOrderForImport() async {
+    let a = URL(fileURLWithPath: "/Folder/../A")
+    let b = URL(fileURLWithPath: "/B")
+    let reader = SequencedFinderReader(states: [
+      .selection([a, b]),
+      .selection([b, a]),
+    ])
+    var dispatchedURLs: [URL] = []
+    let model = makeModel(reader: reader, primary: { dispatchedURLs = $0.finderURLs })
+
+    await model.refresh()
+    let semanticID = model.selectedResultID
+    await model.refresh()
+
+    #expect(model.selectedResultID == semanticID)
+    #expect(model.resultsInGroup(.finderSelection).single?.finderURLs == [b, a])
+    model.performPrimary()
+    #expect(dispatchedURLs == [b, a])
+  }
+
   @Test func arrowsWrapAndReturnDispatchesPrimary() async {
     var dispatched: [String] = []
-    let model = makeModel(items: [item("A", kind: .file), item("B", kind: .file)]) {
+    let model = makeModel(items: [item("A", kind: .file), item("B", kind: .file)], primary: {
       dispatched.append($0.semanticID)
-    }
+    })
     await model.refresh()
     let ids = model.results.map(\.id)
 
@@ -164,12 +223,14 @@ struct QuickSendModelTests {
     items: [ShelfItem] = [],
     history: [HistoryEvent] = [],
     destinations: [RecentDestination] = [],
+    isUndoEligible: @escaping (HistoryEvent) -> Bool = { _ in false },
     primary: @escaping (QuickSendResult) -> Void = { _ in },
     dismiss: @escaping () -> Void = {}
   ) -> QuickSendModel {
     QuickSendModel(
       finderReader: reader ?? StaticFinderReader(state: finder),
       items: { items }, history: { history }, destinations: { destinations },
+      isUndoEligible: isUndoEligible,
       performPrimary: primary, dismiss: dismiss
     )
   }
@@ -204,6 +265,22 @@ private actor SequencedFinderReader: FinderSelectionReading {
   private var states: [FinderSelectionState]
   init(states: [FinderSelectionState]) { self.states = states }
   func readSelection() -> FinderSelectionState { states.removeFirst() }
+}
+
+private actor ControlledFinderReader: FinderSelectionReading {
+  private var continuations: [CheckedContinuation<FinderSelectionState, Never>] = []
+
+  func readSelection() async -> FinderSelectionState {
+    await withCheckedContinuation { continuations.append($0) }
+  }
+
+  func waitForRequestCount(_ count: Int) async {
+    while continuations.count < count { await Task.yield() }
+  }
+
+  func completeRequest(at index: Int, with state: FinderSelectionState) {
+    continuations[index].resume(returning: state)
+  }
 }
 
 private struct TestFailure: LocalizedError {
