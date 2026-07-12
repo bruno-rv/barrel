@@ -62,6 +62,8 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
   }
 
   func openHistory() {
+    selectedIDs = []
+    selectedItemID = nil
     viewMode = .history
   }
 
@@ -79,6 +81,10 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
       _ = try await repository.undo(historyEventID: event.id)
       notifyRepositoryChange()
       await refresh()
+    } catch RepositoryError.undoCleanupFailed(let recovery) {
+      notifyRepositoryChange()
+      await refresh()
+      errorMessage = Self.undoMessage(for: RepositoryError.undoCleanupFailed(recovery: recovery))
     } catch {
       errorMessage = Self.undoMessage(for: error)
     }

@@ -263,7 +263,7 @@ struct ContentView: View {
           Image(systemName: "trash.slash")
         }
         .help("Empty Trash")
-      } else {
+      } else if store.viewMode == .bucket {
         Button {
           store.stackSelectedItems()
         } label: {

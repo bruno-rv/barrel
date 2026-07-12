@@ -33,6 +33,20 @@ final class ShelfStoreHistoryTests: XCTestCase {
     XCTAssertEqual(store.viewMode, .history)
   }
 
+  func testOpenHistoryClearsBucketSelection() async throws {
+    let fixture = try await Fixture()
+    let store = ShelfStore(repository: fixture.repository, indexesSpotlight: false, loadOnInit: false)
+    await store.refresh()
+    let item = try XCTUnwrap(store.visibleItems.first)
+    store.select(item)
+    store.toggleSelection(for: item)
+
+    store.openHistory()
+
+    XCTAssertNil(store.selectedItemID)
+    XCTAssertTrue(store.selectedIDs.isEmpty)
+  }
+
   func testRefreshPrunesHistoryAfterTwentyFourHours() async throws {
     let fixture = try await Fixture()
     _ = try await fixture.export(fileName: "Expired.txt")
@@ -56,6 +70,27 @@ final class ShelfStoreHistoryTests: XCTestCase {
     XCTAssertEqual(store.liveItemCount, 1)
     XCTAssertEqual(store.visibleItems.count, 1)
     XCTAssertFalse(FileManager.default.fileExists(atPath: export.destinationURL!.path))
+  }
+
+  func testCleanupFailedUndoRefreshesCommittedStateAndShowsWarning() async throws {
+    let manager = UndoCleanupFailureFileManager()
+    let fixture = try await Fixture(fileManager: manager)
+    let export = try await fixture.export(fileName: "Cleanup.txt")
+    let store = ShelfStore(repository: fixture.repository, indexesSpotlight: false, loadOnInit: false)
+    await store.refresh()
+    manager.failUndoCleanup = true
+
+    await store.performUndo(export)
+
+    XCTAssertEqual(store.liveItemCount, 1)
+    XCTAssertEqual(store.visibleItems.map(\.id), [export.itemID])
+    XCTAssertEqual(store.historyEvents.first?.kind, .undo)
+    XCTAssertEqual(store.historyEvents.first?.reversedEventID, export.id)
+    XCTAssertEqual(
+      store.historyEvents.first(where: { $0.id == export.id })?.reversedByEventID,
+      store.historyEvents.first?.id
+    )
+    XCTAssertEqual(store.errorMessage, "Undo was saved, but its recovery bytes could not be removed.")
   }
 
   func testUndoConflictMessagesAreSpecific() throws {
@@ -121,7 +156,7 @@ private final class Fixture: @unchecked Sendable {
   private let clock = Clock()
   private(set) var undoEventID: UUID?
 
-  init() async throws {
+  init(fileManager: FileManager = .default) async throws {
     root = FileManager.default.temporaryDirectory
       .appendingPathComponent("ShelfStoreHistoryTests-\(UUID().uuidString)", isDirectory: true)
     source = root.appendingPathComponent("Source.txt")
@@ -134,7 +169,7 @@ private final class Fixture: @unchecked Sendable {
       deviceID: "test",
       historyRetention: 24 * 60 * 60,
       now: { [clock] in clock.now }
-    ))
+    ), fileManager: fileManager)
     _ = try await repository.load()
     _ = await repository.importFiles([source], origin: .imported, expiresAt: nil)
   }
@@ -158,6 +193,17 @@ private final class Fixture: @unchecked Sendable {
         .appendingPathComponent("ShelfStoreHistoryTests-Unloaded-\(UUID().uuidString)"),
       deviceID: "test"
     ))
+  }
+}
+
+private final class UndoCleanupFailureFileManager: FileManager, @unchecked Sendable {
+  var failUndoCleanup = false
+
+  override func removeItem(at URL: URL) throws {
+    if failUndoCleanup, URL.lastPathComponent.hasPrefix(".barrel-undo-") {
+      throw CocoaError(.fileWriteNoPermission)
+    }
+    try super.removeItem(at: URL)
   }
 }
 
