@@ -13,6 +13,7 @@ public struct HistoryEvent: Identifiable, Codable, Hashable, Sendable {
   public var destinationName: String
   public var destinationURL: URL?
   public var destinationBookmark: Data?
+  public var destinationDirectoryBookmark: Data?
   public var fileName: String
   public var contentHash: String
   public var timestamp: Date
@@ -27,6 +28,7 @@ public struct HistoryEvent: Identifiable, Codable, Hashable, Sendable {
     destinationName: String,
     destinationURL: URL?,
     destinationBookmark: Data?,
+    destinationDirectoryBookmark: Data? = nil,
     fileName: String,
     contentHash: String,
     timestamp: Date,
@@ -40,6 +42,7 @@ public struct HistoryEvent: Identifiable, Codable, Hashable, Sendable {
     self.destinationName = destinationName
     self.destinationURL = destinationURL
     self.destinationBookmark = destinationBookmark
+    self.destinationDirectoryBookmark = destinationDirectoryBookmark
     self.fileName = fileName
     self.contentHash = contentHash
     self.timestamp = timestamp

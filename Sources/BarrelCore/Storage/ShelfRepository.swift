@@ -150,6 +150,9 @@ public actor ShelfRepository {
   @discardableResult
   public func export(itemID: UUID, to directoryURL: URL, fileName: String) throws -> HistoryEvent {
     try ensureLoaded()
+    let directoryURL = directoryURL.standardizedFileURL
+    let scoped = directoryURL.startAccessingSecurityScopedResource()
+    defer { if scoped { directoryURL.stopAccessingSecurityScopedResource() } }
     guard let item = exportableItem(id: itemID),
     let relativePath = item.relativePath,
     let sourceURL = managedURL(for: relativePath),
@@ -197,6 +200,7 @@ public actor ShelfRepository {
           includingResourceValuesForKeys: nil,
           relativeTo: nil
         ),
+        destinationDirectoryBookmark: configuration.directoryBookmarkCreator(directoryURL),
         fileName: destinationURL.lastPathComponent,
         contentHash: contentHash,
         timestamp: now,
@@ -553,6 +557,7 @@ public actor ShelfRepository {
       destinationName: "Barrel",
       destinationURL: destinationURL,
       destinationBookmark: exportEvent.destinationBookmark,
+      destinationDirectoryBookmark: exportEvent.destinationDirectoryBookmark,
       fileName: exportEvent.fileName,
       contentHash: exportEvent.contentHash,
       timestamp: now,

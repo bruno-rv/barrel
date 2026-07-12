@@ -3,6 +3,60 @@ import XCTest
 @testable import BarrelCore
 
 final class HistoryRepositoryTests: XCTestCase {
+  func testExportPersistsDestinationDirectoryBookmarkWithoutChangingSyncRecords() async throws {
+    let bookmark = Data("directory-bookmark".utf8)
+    let fixture = try ExportFixture(
+      fileName: "report.pdf",
+      contents: "report bytes",
+      configuration: { root in
+        RepositoryConfiguration(
+          rootURL: root,
+          deviceID: "test-mac",
+          directoryBookmarkCreator: { _ in bookmark }
+        )
+      }
+    )
+    defer { fixture.remove() }
+    let syncBeforeExport = try await fixture.repository.syncRecords()
+    let fileName = try XCTUnwrap(fixture.item.fileName)
+
+    let event = try await fixture.repository.export(
+      itemID: fixture.item.id,
+      to: fixture.destination,
+      fileName: fileName
+    )
+
+    XCTAssertEqual(event.destinationDirectoryBookmark, bookmark)
+    let historyAfterExport = try await fixture.repository.historySnapshot()
+    let syncAfterExport = try await fixture.repository.syncRecords()
+    XCTAssertEqual(historyAfterExport.first?.destinationDirectoryBookmark, bookmark)
+    XCTAssertEqual(syncAfterExport, syncBeforeExport)
+
+    let reloaded = ShelfRepository(configuration: fixture.configuration)
+    let reloadedHistory = try await reloaded.historySnapshot()
+    XCTAssertEqual(reloadedHistory.first?.destinationDirectoryBookmark, bookmark)
+
+    let undo = try await reloaded.undo(historyEventID: event.id)
+    XCTAssertEqual(undo.destinationDirectoryBookmark, bookmark)
+  }
+
+  func testHistoryEventDecodesLegacyJSONWithoutDestinationDirectoryBookmark() throws {
+    let event = event(timestamp: Date(timeIntervalSince1970: 1_800_000_000))
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    var json = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: encoder.encode(event)) as? [String: Any]
+    )
+    json.removeValue(forKey: "destinationDirectoryBookmark")
+    let legacyData = try JSONSerialization.data(withJSONObject: json)
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+
+    let decoded = try decoder.decode(HistoryEvent.self, from: legacyData)
+
+    XCTAssertNil(decoded.destinationDirectoryBookmark)
+  }
+
   func testExportPreservesExactNamePersistsLocalStateAndPreservesSyncRecords() async throws {
     let fixture = try ExportFixture(fileName: "report.pdf", contents: "report bytes")
     defer { fixture.remove() }

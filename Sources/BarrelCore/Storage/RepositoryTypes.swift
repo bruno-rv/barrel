@@ -1,6 +1,7 @@
 import Foundation
 
 public typealias ManifestWriter = @Sendable (_ data: Data, _ destination: URL) throws -> Void
+public typealias DirectoryBookmarkCreator = @Sendable (URL) -> Data?
 public enum ExportFaultPoint: Sendable {
   case afterDirectoryValidation, beforeStagedIdentity, afterStaging, afterPendingCommit, afterPublish, beforeFinalCommit
 }
@@ -15,6 +16,13 @@ public struct RepositoryConfiguration: Sendable {
   public static let defaultManifestWriter: ManifestWriter = { data, destination in
     try data.write(to: destination, options: .atomic)
   }
+  public static let defaultDirectoryBookmarkCreator: DirectoryBookmarkCreator = { directory in
+    try? directory.bookmarkData(
+      options: .withSecurityScope,
+      includingResourceValuesForKeys: nil,
+      relativeTo: nil
+    )
+  }
 
   public let rootURL: URL
   public let deviceID: String
@@ -24,6 +32,7 @@ public struct RepositoryConfiguration: Sendable {
   public let now: @Sendable () -> Date
   public let manifestWriter: ManifestWriter
   public let exportFaultInjector: ExportFaultInjector
+  public let directoryBookmarkCreator: DirectoryBookmarkCreator
 
   public init(
     rootURL: URL,
@@ -33,7 +42,8 @@ public struct RepositoryConfiguration: Sendable {
     historyRetention: TimeInterval = 86_400,
     now: @escaping @Sendable () -> Date = { Date() },
     manifestWriter: @escaping ManifestWriter = RepositoryConfiguration.defaultManifestWriter,
-    exportFaultInjector: @escaping ExportFaultInjector = { _ in }
+    exportFaultInjector: @escaping ExportFaultInjector = { _ in },
+    directoryBookmarkCreator: @escaping DirectoryBookmarkCreator = RepositoryConfiguration.defaultDirectoryBookmarkCreator
   ) {
     self.rootURL = rootURL
     self.deviceID = deviceID
@@ -43,6 +53,7 @@ public struct RepositoryConfiguration: Sendable {
     self.now = now
     self.manifestWriter = manifestWriter
     self.exportFaultInjector = exportFaultInjector
+    self.directoryBookmarkCreator = directoryBookmarkCreator
   }
 }
 
