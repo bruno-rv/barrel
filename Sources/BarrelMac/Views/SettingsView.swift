@@ -11,6 +11,8 @@ struct SettingsView: View {
   @AppStorage("ShelfEdge") private var shelfEdge = "left"
   @AppStorage("GlobalHotKeyEnabled") private var globalHotKeyEnabled = true
   @AppStorage("GlobalHotKeyChoice") private var globalHotKeyChoice = GlobalHotKeyChoice.controlOptionSpace.rawValue
+  @AppStorage("QuickSendHotKeyEnabled") private var quickSendHotKeyEnabled = true
+  @AppStorage("QuickSendHotKeyChoice") private var quickSendHotKeyChoice = GlobalHotKeyChoice.controlShiftSpace.rawValue
   @AppStorage("CloudSyncEnabled") private var cloudSyncEnabled = false
 
   var body: some View {
@@ -39,15 +41,28 @@ struct SettingsView: View {
           .foregroundStyle(.secondary)
       }
 
-      Section("Global Shortcut") {
+      Section("Global Shortcuts") {
         Toggle("Enable global shelf shortcut", isOn: $globalHotKeyEnabled)
-        Picker("Shortcut", selection: $globalHotKeyChoice) {
+        Picker("Shelf shortcut", selection: $globalHotKeyChoice) {
           ForEach(GlobalHotKeyChoice.allCases) { choice in
             Text(choice.label).tag(choice.rawValue)
           }
         }
         .disabled(!globalHotKeyEnabled)
         if let registrationError = hotKeyController.registrationError {
+          Text(registrationError)
+            .font(.footnote)
+            .foregroundStyle(.red)
+        }
+
+        Toggle("Enable Quick Send shortcut", isOn: $quickSendHotKeyEnabled)
+        Picker("Quick Send shortcut", selection: $quickSendHotKeyChoice) {
+          ForEach(GlobalHotKeyChoice.allCases) { choice in
+            Text(choice.label).tag(choice.rawValue)
+          }
+        }
+        .disabled(!quickSendHotKeyEnabled)
+        if let registrationError = hotKeyController.registrationError(for: .quickSend) {
           Text(registrationError)
             .font(.footnote)
             .foregroundStyle(.red)

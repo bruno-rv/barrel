@@ -4,8 +4,35 @@ import Foundation
 
 extension Notification.Name {
   static let showBarrelShelf = Notification.Name("showBarrelShelf")
+  static let showBarrelQuickSend = Notification.Name("showBarrelQuickSend")
   static let selectShelfItem = Notification.Name("selectShelfItem")
   static let repositoryDidChange = Notification.Name("repositoryDidChange")
+}
+
+enum GlobalHotKeyAction: UInt32, CaseIterable, Sendable {
+  case shelf = 1
+  case quickSend = 2
+
+  var title: String {
+    switch self {
+    case .shelf: "Shelf"
+    case .quickSend: "Quick Send"
+    }
+  }
+
+  var enabledKey: String {
+    switch self {
+    case .shelf: "GlobalHotKeyEnabled"
+    case .quickSend: "QuickSendHotKeyEnabled"
+    }
+  }
+
+  var choiceKey: String {
+    switch self {
+    case .shelf: "GlobalHotKeyChoice"
+    case .quickSend: "QuickSendHotKeyChoice"
+    }
+  }
 }
 
 enum GlobalHotKeyChoice: String, CaseIterable, Identifiable {
@@ -39,19 +66,58 @@ enum GlobalHotKeyChoice: String, CaseIterable, Identifiable {
   }
 }
 
+protocol GlobalHotKeyRegistering {
+  func register(action: GlobalHotKeyAction, choice: GlobalHotKeyChoice) -> (OSStatus, EventHotKeyRef?)
+  func unregister(_ hotKey: EventHotKeyRef)
+}
+
+private struct CarbonGlobalHotKeyRegistrar: GlobalHotKeyRegistering {
+  func register(action: GlobalHotKeyAction, choice: GlobalHotKeyChoice) -> (OSStatus, EventHotKeyRef?) {
+    let identifier = EventHotKeyID(signature: 0x4252_524C, id: action.rawValue)
+    var hotKey: EventHotKeyRef?
+    let status = RegisterEventHotKey(
+      choice.keyCode,
+      choice.modifiers,
+      identifier,
+      GetApplicationEventTarget(),
+      0,
+      &hotKey
+    )
+    return (status, hotKey)
+  }
+
+  func unregister(_ hotKey: EventHotKeyRef) {
+    UnregisterEventHotKey(hotKey)
+  }
+}
+
 @MainActor
 final class GlobalHotKeyController: ObservableObject {
   static let shared = GlobalHotKeyController()
 
-  @Published private(set) var registrationError: String?
+  @Published private var registrationErrors: [GlobalHotKeyAction: String] = [:]
+
+  var registrationError: String? { registrationError(for: .shelf) }
 
   private let defaults: UserDefaults
+  private let registrar: any GlobalHotKeyRegistering
+  private let notificationCenter: NotificationCenter
   private var eventHandler: EventHandlerRef?
-  private var hotKey: EventHotKeyRef?
+  private var hotKeys: [GlobalHotKeyAction: EventHotKeyRef] = [:]
   private var defaultsObserver: NSObjectProtocol?
 
-  init(defaults: UserDefaults = .standard) {
+  init(
+    defaults: UserDefaults = .standard,
+    registrar: any GlobalHotKeyRegistering = CarbonGlobalHotKeyRegistrar(),
+    notificationCenter: NotificationCenter = .default
+  ) {
     self.defaults = defaults
+    self.registrar = registrar
+    self.notificationCenter = notificationCenter
+  }
+
+  func registrationError(for action: GlobalHotKeyAction) -> String? {
+    registrationErrors[action]
   }
 
   func start() {
@@ -62,11 +128,22 @@ final class GlobalHotKeyController: ObservableObject {
     )
     let status = InstallEventHandler(
       GetApplicationEventTarget(),
-      { _, _, userData in
-        guard let userData else { return noErr }
+      { _, event, userData in
+        guard let event, let userData else { return noErr }
+        var identifier = EventHotKeyID()
+        let status = GetEventParameter(
+          event,
+          EventParamName(kEventParamDirectObject),
+          EventParamType(typeEventHotKeyID),
+          nil,
+          MemoryLayout<EventHotKeyID>.size,
+          nil,
+          &identifier
+        )
+        guard status == noErr else { return status }
         let controller = Unmanaged<GlobalHotKeyController>.fromOpaque(userData).takeUnretainedValue()
         Task { @MainActor in
-          controller.hotKeyPressed()
+          controller.handleHotKeyID(identifier.id)
         }
         return noErr
       },
@@ -77,7 +154,8 @@ final class GlobalHotKeyController: ObservableObject {
     )
     guard status == noErr else {
       eventHandler = nil
-      registrationError = "Could not install the shortcut handler (OSStatus \(status))."
+      registrationErrors[.shelf] = "Could not install the shortcut handler (OSStatus \(status))."
+      registrationErrors[.quickSend] = "Could not install the shortcut handler (OSStatus \(status))."
       return
     }
     defaultsObserver = NotificationCenter.default.addObserver(
@@ -86,14 +164,14 @@ final class GlobalHotKeyController: ObservableObject {
       queue: .main
     ) { [weak self] _ in
       Task { @MainActor in
-        self?.registerConfiguredHotKey()
+        self?.configureHotKeys()
       }
     }
-    registerConfiguredHotKey()
+    configureHotKeys()
   }
 
   func stop() {
-    unregisterHotKey()
+    unregisterHotKeys()
     if let eventHandler {
       RemoveEventHandler(eventHandler)
       self.eventHandler = nil
@@ -104,38 +182,50 @@ final class GlobalHotKeyController: ObservableObject {
     }
   }
 
-  private func registerConfiguredHotKey() {
-    unregisterHotKey()
-    registrationError = nil
-    guard defaults.bool(forKey: "GlobalHotKeyEnabled") else { return }
-    let storedChoice = defaults.string(forKey: "GlobalHotKeyChoice") ?? ""
-    let choice = GlobalHotKeyChoice(rawValue: storedChoice) ?? .controlOptionSpace
-    let identifier = EventHotKeyID(signature: 0x4252_524C, id: 1)
-    var registeredHotKey: EventHotKeyRef?
-    let status = RegisterEventHotKey(
-      choice.keyCode,
-      choice.modifiers,
-      identifier,
-      GetApplicationEventTarget(),
-      0,
-      &registeredHotKey
-    )
-    guard status == noErr, let registeredHotKey else {
-      registrationError = "That global shortcut could not be registered (OSStatus \(status))."
-      hotKey = nil
-      return
+  func configureHotKeys() {
+    unregisterHotKeys()
+    registrationErrors.removeAll()
+
+    var configuredChoices: [GlobalHotKeyAction: GlobalHotKeyChoice] = [:]
+    for action in GlobalHotKeyAction.allCases where defaults.bool(forKey: action.enabledKey) {
+      guard let storedChoice = defaults.string(forKey: action.choiceKey),
+            let choice = GlobalHotKeyChoice(rawValue: storedChoice) else {
+        registrationErrors[action] = "The saved \(action.title) shortcut is invalid."
+        continue
+      }
+      configuredChoices[action] = choice
     }
-    hotKey = registeredHotKey
+
+    if let shelfChoice = configuredChoices[.shelf], configuredChoices[.quickSend] == shelfChoice {
+      configuredChoices[.quickSend] = nil
+      registrationErrors[.quickSend] = "Quick Send shortcut conflicts with the Shelf shortcut."
+    }
+
+    for action in GlobalHotKeyAction.allCases {
+      guard let choice = configuredChoices[action] else { continue }
+      let (status, hotKey) = registrar.register(action: action, choice: choice)
+      guard status == noErr, let hotKey else {
+        registrationErrors[action] = "\(action.title) shortcut could not be registered (OSStatus \(status))."
+        continue
+      }
+      hotKeys[action] = hotKey
+    }
   }
 
-  private func unregisterHotKey() {
-    if let hotKey {
-      UnregisterEventHotKey(hotKey)
-      self.hotKey = nil
+  func handleHotKeyID(_ rawValue: UInt32) {
+    guard let action = GlobalHotKeyAction(rawValue: rawValue) else { return }
+    switch action {
+    case .shelf:
+      notificationCenter.post(name: .showBarrelShelf, object: nil)
+    case .quickSend:
+      notificationCenter.post(name: .showBarrelQuickSend, object: nil)
     }
   }
 
-  private func hotKeyPressed() {
-    NotificationCenter.default.post(name: .showBarrelShelf, object: nil)
+  private func unregisterHotKeys() {
+    for hotKey in hotKeys.values {
+      registrar.unregister(hotKey)
+    }
+    hotKeys.removeAll()
   }
 }

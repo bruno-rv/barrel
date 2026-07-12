@@ -13,6 +13,8 @@ final class BarrelEnvironment {
       "StorageQuotaBytes": 1_073_741_824,
       "GlobalHotKeyEnabled": true,
       "GlobalHotKeyChoice": "control-option-space",
+      "QuickSendHotKeyEnabled": true,
+      "QuickSendHotKeyChoice": "control-shift-space",
       "CloudSyncEnabled": false
     ])
     let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
