@@ -84,6 +84,17 @@ public actor ShelfRepository {
     items
   }
 
+  public func temporarySnapshot() throws -> [ShelfItem] {
+    try ensureLoaded()
+    try pruneHistory()
+    return items.filter {
+      !exportedItemIDs.contains($0.id)
+        && $0.trashedAt == nil
+        && $0.deletedAt == nil
+        && $0.relativePath != nil
+    }
+  }
+
   public func historySnapshot() throws -> [HistoryEvent] {
     try ensureLoaded()
     try pruneHistory()
@@ -92,6 +103,147 @@ public actor ShelfRepository {
         ? $0.id.uuidString < $1.id.uuidString
         : $0.timestamp > $1.timestamp
     }
+  }
+
+  @discardableResult
+  public func export(itemID: UUID, to directoryURL: URL) throws -> HistoryEvent {
+    try ensureLoaded()
+    try pruneHistory()
+    guard let item = items.first(where: {
+      $0.id == itemID
+        && $0.trashedAt == nil
+        && $0.deletedAt == nil
+        && !exportedItemIDs.contains($0.id)
+    }),
+    let relativePath = item.relativePath,
+    let sourceURL = managedURL(for: relativePath),
+    let contentHash = item.contentHash else {
+      throw RepositoryError.itemNotFound(itemID)
+    }
+    let sourceValues = try sourceURL.resourceValues(forKeys: [.isRegularFileKey])
+    guard sourceValues.isRegularFile == true else {
+      throw RepositoryError.itemNotFound(itemID)
+    }
+
+    let destinationURL = uniqueExportURL(
+      in: directoryURL,
+      fileName: item.fileName ?? sourceURL.lastPathComponent
+    )
+    try fileManager.copyItem(at: sourceURL, to: destinationURL)
+    do {
+      let destinationValues = try destinationURL.resourceValues(forKeys: [.isRegularFileKey])
+      guard destinationValues.isRegularFile == true,
+            try Self.hash(file: destinationURL) == contentHash else {
+        throw RepositoryError.undoTargetChanged(destinationURL)
+      }
+      let now = configuration.now()
+      let event = HistoryEvent(
+        itemID: itemID,
+        kind: .export,
+        sourceName: "Barrel",
+        destinationName: directoryURL.lastPathComponent,
+        destinationURL: destinationURL,
+        destinationBookmark: try? destinationURL.bookmarkData(
+          options: .withSecurityScope,
+          includingResourceValuesForKeys: nil,
+          relativeTo: nil
+        ),
+        fileName: destinationURL.lastPathComponent,
+        contentHash: contentHash,
+        timestamp: now,
+        reversedEventID: nil,
+        reversedByEventID: nil
+      )
+      let updatedExportedIDs = exportedItemIDs.union([itemID])
+      let updatedHistory = history + [event]
+      try save(items, exportedItemIDs: updatedExportedIDs, history: updatedHistory)
+      exportedItemIDs = updatedExportedIDs
+      history = updatedHistory
+      return event
+    } catch {
+      try? fileManager.removeItem(at: destinationURL)
+      throw error
+    }
+  }
+
+  @discardableResult
+  public func undo(historyEventID: UUID) throws -> HistoryEvent {
+    try ensureLoaded()
+    try pruneHistory()
+    guard let eventIndex = history.firstIndex(where: { $0.id == historyEventID }),
+          history[eventIndex].kind == .export,
+          history[eventIndex].reversedByEventID == nil else {
+      throw RepositoryError.undoIneligible(historyEventID)
+    }
+    let exportEvent = history[eventIndex]
+    let latestExport = history
+      .filter { $0.itemID == exportEvent.itemID && $0.kind == .export }
+      .max { lhs, rhs in
+        lhs.timestamp == rhs.timestamp
+          ? lhs.id.uuidString < rhs.id.uuidString
+          : lhs.timestamp < rhs.timestamp
+      }
+    guard latestExport?.id == historyEventID,
+          exportedItemIDs.contains(exportEvent.itemID) else {
+      throw RepositoryError.undoIneligible(historyEventID)
+    }
+
+    let destinationURL = try resolvedDestination(for: exportEvent)
+    var isDirectory: ObjCBool = false
+    guard fileManager.fileExists(atPath: destinationURL.path, isDirectory: &isDirectory) else {
+      throw RepositoryError.undoTargetMissing(destinationURL)
+    }
+    guard !isDirectory.boolValue,
+          (try? destinationURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else {
+      throw RepositoryError.undoTargetNotRegularFile(destinationURL)
+    }
+    let scoped = destinationURL.startAccessingSecurityScopedResource()
+    defer { if scoped { destinationURL.stopAccessingSecurityScopedResource() } }
+    let actualHash: String
+    do {
+      actualHash = try Self.hash(file: destinationURL)
+    } catch {
+      throw RepositoryError.undoTargetInaccessible(destinationURL)
+    }
+    guard actualHash == exportEvent.contentHash else {
+      throw RepositoryError.undoTargetChanged(destinationURL)
+    }
+
+    let stagingURL = destinationURL.deletingLastPathComponent()
+      .appendingPathComponent(".barrel-undo-\(UUID().uuidString)")
+    do {
+      try fileManager.moveItem(at: destinationURL, to: stagingURL)
+    } catch {
+      throw RepositoryError.undoTargetInaccessible(destinationURL)
+    }
+    let now = configuration.now()
+    let undoEvent = HistoryEvent(
+      itemID: exportEvent.itemID,
+      kind: .undo,
+      sourceName: exportEvent.destinationName,
+      destinationName: "Barrel",
+      destinationURL: destinationURL,
+      destinationBookmark: exportEvent.destinationBookmark,
+      fileName: exportEvent.fileName,
+      contentHash: exportEvent.contentHash,
+      timestamp: now,
+      reversedEventID: exportEvent.id,
+      reversedByEventID: nil
+    )
+    var updatedHistory = history
+    updatedHistory[eventIndex].reversedByEventID = undoEvent.id
+    updatedHistory.append(undoEvent)
+    let updatedExportedIDs = exportedItemIDs.subtracting([exportEvent.itemID])
+    do {
+      try save(items, exportedItemIDs: updatedExportedIDs, history: updatedHistory)
+    } catch {
+      try? fileManager.moveItem(at: stagingURL, to: destinationURL)
+      throw error
+    }
+    exportedItemIDs = updatedExportedIDs
+    history = updatedHistory
+    try? fileManager.removeItem(at: stagingURL)
+    return undoEvent
   }
 
   public func setStorageQuota(_ bytes: Int64) {
@@ -691,6 +843,43 @@ public actor ShelfRepository {
   private func makeRelativePath(for url: URL) -> String {
     let rootPath = configuration.rootURL.standardizedFileURL.path
     return String(url.standardizedFileURL.path.dropFirst(rootPath.count + 1))
+  }
+
+  private func uniqueExportURL(in directoryURL: URL, fileName: String) -> URL {
+    let safeName = URL(fileURLWithPath: fileName).lastPathComponent
+    let candidate = directoryURL.appendingPathComponent(safeName)
+    guard fileManager.fileExists(atPath: candidate.path) else { return candidate }
+    let fileURL = URL(fileURLWithPath: safeName)
+    let ext = fileURL.pathExtension
+    let stem = fileURL.deletingPathExtension().lastPathComponent
+    var suffix = 2
+    while true {
+      let name = ext.isEmpty ? "\(stem) \(suffix)" : "\(stem) \(suffix).\(ext)"
+      let proposed = directoryURL.appendingPathComponent(name)
+      if !fileManager.fileExists(atPath: proposed.path) { return proposed }
+      suffix += 1
+    }
+  }
+
+  private func resolvedDestination(for event: HistoryEvent) throws -> URL {
+    if let bookmark = event.destinationBookmark {
+      do {
+        var stale = false
+        return try URL(
+          resolvingBookmarkData: bookmark,
+          options: [.withSecurityScope, .withoutUI],
+          relativeTo: nil,
+          bookmarkDataIsStale: &stale
+        )
+      } catch {
+        if let destinationURL = event.destinationURL { return destinationURL }
+        throw RepositoryError.undoIneligible(event.id)
+      }
+    }
+    guard let destinationURL = event.destinationURL else {
+      throw RepositoryError.undoIneligible(event.id)
+    }
+    return destinationURL
   }
 
   private func kind(for url: URL) -> ShelfKind {
