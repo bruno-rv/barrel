@@ -49,8 +49,9 @@ Barrel does not request Accessibility permission or synthesize copy commands.
 
 Quick Send uses one search field and one ranked result list. An empty query
 shows actions and recent content. A nonempty query searches case-insensitively
-across filenames, item titles, tags, movement source and destination names,
-and destination folder names.
+across filenames, item titles, item kind and origin tokens, movement source and
+destination names, and destination folder names. Quick Send does not add a new
+user-tag model.
 
 Results are grouped and ranked in this order:
 
