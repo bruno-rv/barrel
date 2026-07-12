@@ -54,6 +54,26 @@ struct EdgeShelfStateMachine {
   }
 
   mutating func handle(_ event: EdgeShelfEvent) -> [EdgeShelfEffect] {
+    var effects = transition(for: event)
+    let establishesFreshMinimumVisibility: Bool
+    switch event {
+    case .explicitShow, .autoHideChanged(isEnabled: false, pointerInside: _):
+      establishesFreshMinimumVisibility = true
+    default:
+      establishesFreshMinimumVisibility = effects.contains(.show)
+    }
+
+    if establishesFreshMinimumVisibility,
+       [.shown, .dragLocked].contains(phase) {
+      isMinimumVisibilityElapsed = false
+      if !effects.contains(.scheduleMinimumVisibility) {
+        effects.append(.scheduleMinimumVisibility)
+      }
+    }
+    return effects
+  }
+
+  private mutating func transition(for event: EdgeShelfEvent) -> [EdgeShelfEffect] {
     switch (phase, event) {
     case (.hidden, .edgeEntered):
       phase = .revealPending
@@ -63,8 +83,7 @@ struct EdgeShelfStateMachine {
       return [.cancelReveal]
     case (.revealPending, .revealDelayElapsed):
       phase = .shown
-      isMinimumVisibilityElapsed = false
-      return [.show, .scheduleMinimumVisibility]
+      return [.show]
     case (.shown, .pointerExitedPanel):
       isPointerInsidePanel = false
       if isMinimumVisibilityElapsed {
@@ -96,14 +115,12 @@ struct EdgeShelfStateMachine {
       return [.forgetPendingHide]
     case (.hidden, .dragBegan):
       isDragActive = true
-      isMinimumVisibilityElapsed = false
       phase = .dragLocked
-      return [.show, .scheduleMinimumVisibility]
+      return [.show]
     case (.revealPending, .dragBegan):
       isDragActive = true
-      isMinimumVisibilityElapsed = false
       phase = .dragLocked
-      return [.cancelReveal, .show, .scheduleMinimumVisibility]
+      return [.cancelReveal, .show]
     case (.dragLocked, .dragEnded(pointerInside: true)):
       isDragActive = false
       isPointerInsidePanel = true
@@ -121,38 +138,33 @@ struct EdgeShelfStateMachine {
       return [.rememberPendingHide]
     case (.revealPending, .explicitShow):
       phase = .shown
-      isMinimumVisibilityElapsed = false
-      return [.cancelReveal, .show, .scheduleMinimumVisibility]
+      return [.cancelReveal, .show]
     case (.hidePending, .explicitShow):
       phase = .shown
-      isMinimumVisibilityElapsed = false
-      return [.cancelHide, .show, .scheduleMinimumVisibility]
+      return [.cancelHide, .show]
     case (.hidden, .explicitShow), (.shown, .explicitShow):
       phase = .shown
-      isMinimumVisibilityElapsed = false
-      return [.show, .scheduleMinimumVisibility]
+      return [.show]
     case (.dragLocked, .explicitShow):
       return [.show]
     case (.revealPending, .autoHideChanged(isEnabled: false, pointerInside: let pointerInside)):
       phase = .shown
-      isMinimumVisibilityElapsed = false
       isPointerInsidePanel = pointerInside
-      return [.cancelReveal, .show, .scheduleMinimumVisibility]
+      return [.cancelReveal, .show]
     case (.hidePending, .autoHideChanged(isEnabled: false, pointerInside: let pointerInside)):
       phase = .shown
-      isMinimumVisibilityElapsed = false
       isPointerInsidePanel = pointerInside
-      return [.cancelHide, .show, .scheduleMinimumVisibility]
+      return [.cancelHide, .show]
     case (.hidden, .autoHideChanged(isEnabled: false, pointerInside: let pointerInside)):
       phase = .shown
-      isMinimumVisibilityElapsed = false
       isPointerInsidePanel = pointerInside
-      return [.show, .scheduleMinimumVisibility]
+      return [.show]
     case (.shown, .autoHideChanged(isEnabled: false, pointerInside: let pointerInside)):
-      isMinimumVisibilityElapsed = false
       isPointerInsidePanel = pointerInside
       hasPendingHide = false
-      return [.scheduleMinimumVisibility]
+      return []
+    case (.dragLocked, .autoHideChanged(isEnabled: false, pointerInside: _)):
+      return []
     case (.shown, .autoHideChanged(isEnabled: true, pointerInside: false)):
       isPointerInsidePanel = false
       if !isMinimumVisibilityElapsed {

@@ -175,6 +175,70 @@ final class ShelfPanelControllerTests: XCTestCase {
   }
 
   @MainActor
+  func testAutoHideToggleDuringDragRestartsHoldBeforeMouseUpOutside() {
+    let defaults = makeDefaults()
+    defaults.set(true, forKey: ShelfWindowPreferences.autoHideKey)
+    let panel = ShelfPanelController.makePanel(contentView: NSView())
+    let scheduler = TestEdgeShelfScheduler()
+    guard let screen = NSScreen.main else {
+      return XCTFail("Expected a main screen")
+    }
+    let outsidePoint = NSPoint(x: screen.frame.midX, y: screen.frame.midY)
+    let controller = EdgeShelfController(
+      panel: panel,
+      defaults: defaults,
+      mouseLocation: { outsidePoint },
+      scheduler: scheduler
+    )
+    controller.start()
+    defer { controller.stop() }
+    controller.showExplicitly()
+    controller.setDropTargeted(true)
+
+    defaults.set(false, forKey: ShelfWindowPreferences.autoHideKey)
+    controller.settingsDidChange()
+    defaults.set(true, forKey: ShelfWindowPreferences.autoHideKey)
+    controller.settingsDidChange()
+    sendLeftMouseUp(at: outsidePoint)
+
+    scheduler.advance(by: 2.999)
+    XCTAssertTrue(panel.frame.intersects(screen.frame))
+    scheduler.advance(by: 0.001)
+    XCTAssertFalse(panel.frame.intersects(screen.frame))
+  }
+
+  @MainActor
+  func testExplicitShowDuringDragRestartsElapsedHoldBeforeMouseUpOutside() {
+    let defaults = makeDefaults()
+    defaults.set(true, forKey: ShelfWindowPreferences.autoHideKey)
+    let panel = ShelfPanelController.makePanel(contentView: NSView())
+    let scheduler = TestEdgeShelfScheduler()
+    guard let screen = NSScreen.main else {
+      return XCTFail("Expected a main screen")
+    }
+    let outsidePoint = NSPoint(x: screen.frame.midX, y: screen.frame.midY)
+    let controller = EdgeShelfController(
+      panel: panel,
+      defaults: defaults,
+      mouseLocation: { outsidePoint },
+      scheduler: scheduler
+    )
+    controller.start()
+    defer { controller.stop() }
+    controller.showExplicitly()
+    controller.setDropTargeted(true)
+    scheduler.advance(by: 3.0)
+
+    controller.showExplicitly()
+    sendLeftMouseUp(at: outsidePoint)
+
+    scheduler.advance(by: 2.999)
+    XCTAssertTrue(panel.frame.intersects(screen.frame))
+    scheduler.advance(by: 0.001)
+    XCTAssertFalse(panel.frame.intersects(screen.frame))
+  }
+
+  @MainActor
   func testStopCancelsEveryPendingTask() {
     let defaults = makeDefaults()
     defaults.set(true, forKey: ShelfWindowPreferences.autoHideKey)

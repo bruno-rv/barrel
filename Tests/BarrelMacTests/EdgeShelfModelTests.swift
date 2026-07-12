@@ -59,6 +59,62 @@ final class EdgeShelfModelTests: XCTestCase {
     XCTAssertEqual(machine.phase, .hidden)
   }
 
+  func testAutoHideToggleDuringDragStartsFreshHoldBeforeUnlockingOutside() {
+    var machine = EdgeShelfStateMachine(phase: .dragLocked)
+
+    XCTAssertEqual(
+      machine.handle(.autoHideChanged(isEnabled: false, pointerInside: false)),
+      [.scheduleMinimumVisibility]
+    )
+    XCTAssertEqual(
+      machine.handle(.autoHideChanged(isEnabled: true, pointerInside: false)),
+      []
+    )
+    XCTAssertEqual(
+      machine.handle(.dragEnded(pointerInside: false)),
+      [.rememberPendingHide]
+    )
+    XCTAssertEqual(machine.phase, .shown)
+    XCTAssertEqual(machine.handle(.minimumVisibilityElapsed), [.hide])
+  }
+
+  func testExplicitShowDuringDragRestartsElapsedHoldBeforeUnlockingOutside() {
+    var machine = EdgeShelfStateMachine(phase: .shown)
+    _ = machine.handle(.minimumVisibilityElapsed)
+    _ = machine.handle(.dragBegan)
+
+    XCTAssertEqual(
+      machine.handle(.explicitShow),
+      [.show, .scheduleMinimumVisibility]
+    )
+    XCTAssertEqual(
+      machine.handle(.dragEnded(pointerInside: false)),
+      [.rememberPendingHide]
+    )
+    XCTAssertEqual(machine.phase, .shown)
+    XCTAssertEqual(machine.handle(.minimumVisibilityElapsed), [.hide])
+  }
+
+  func testExplicitShowEstablishesFreshHoldFromEveryVisibleEntryPhase() {
+    for initialPhase in EdgeShelfPhase.allCasesForTesting {
+      var machine = EdgeShelfStateMachine(phase: initialPhase)
+      _ = machine.handle(.minimumVisibilityElapsed)
+
+      XCTAssertTrue(
+        machine.handle(.explicitShow).contains(.scheduleMinimumVisibility),
+        "Expected a fresh hold from \(initialPhase)"
+      )
+
+      let exitEffects: [EdgeShelfEffect]
+      if initialPhase == .dragLocked {
+        exitEffects = machine.handle(.dragEnded(pointerInside: false))
+      } else {
+        exitEffects = machine.handle(.pointerExitedPanel)
+      }
+      XCTAssertFalse(exitEffects.contains(.hide), "Hid early from \(initialPhase)")
+    }
+  }
+
   func testPointerExitAfterMinimumVisibilityHidesPanel() {
     var machine = EdgeShelfStateMachine()
     _ = machine.handle(.edgeEntered)
@@ -285,4 +341,10 @@ final class EdgeShelfModelTests: XCTestCase {
       display: display
     ))
   }
+}
+
+private extension EdgeShelfPhase {
+  static let allCasesForTesting: [EdgeShelfPhase] = [
+    .hidden, .revealPending, .shown, .hidePending, .dragLocked,
+  ]
 }
