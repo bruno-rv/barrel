@@ -148,6 +148,11 @@ struct EdgeShelfStateMachine {
       isMinimumVisibilityElapsed = false
       isPointerInsidePanel = pointerInside
       return [.show, .scheduleMinimumVisibility]
+    case (.shown, .autoHideChanged(isEnabled: false, pointerInside: let pointerInside)):
+      isMinimumVisibilityElapsed = false
+      isPointerInsidePanel = pointerInside
+      hasPendingHide = false
+      return [.scheduleMinimumVisibility]
     case (.shown, .autoHideChanged(isEnabled: true, pointerInside: false)):
       isPointerInsidePanel = false
       if !isMinimumVisibilityElapsed {

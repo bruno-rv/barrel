@@ -240,6 +240,78 @@ final class ShelfPanelControllerTests: XCTestCase {
   }
 
   @MainActor
+  func testDisablingShownShelfBeforeOldHoldElapsedRestartsMinimumVisibilityDeadline() {
+    let defaults = makeDefaults()
+    defaults.set(true, forKey: ShelfWindowPreferences.autoHideKey)
+    let panel = ShelfPanelController.makePanel(contentView: NSView())
+    let screen = ShelfScreen(
+      displayID: 1,
+      frame: NSRect(x: 0, y: 0, width: 600, height: 700),
+      visibleFrame: NSRect(x: 0, y: 0, width: 600, height: 680),
+      isMain: true
+    )
+    let scheduler = TestEdgeShelfScheduler()
+    let point = NSPoint(x: screen.frame.midX, y: screen.frame.midY)
+    let controller = EdgeShelfController(
+      panel: panel,
+      defaults: defaults,
+      mouseLocation: { point },
+      screens: { [screen] },
+      scheduler: scheduler
+    )
+    controller.start()
+    defer { controller.stop() }
+    controller.showExplicitly()
+    scheduler.advance(by: 1.0)
+
+    defaults.set(false, forKey: ShelfWindowPreferences.autoHideKey)
+    controller.settingsDidChange()
+    defaults.set(true, forKey: ShelfWindowPreferences.autoHideKey)
+    controller.settingsDidChange()
+
+    scheduler.advance(by: 2.999)
+    XCTAssertTrue(panel.frame.intersects(screen.frame))
+    scheduler.advance(by: 0.001)
+    XCTAssertFalse(panel.frame.intersects(screen.frame))
+  }
+
+  @MainActor
+  func testDisablingShownShelfAfterOldHoldElapsedStartsFreshMinimumVisibilityDeadline() {
+    let defaults = makeDefaults()
+    defaults.set(true, forKey: ShelfWindowPreferences.autoHideKey)
+    let panel = ShelfPanelController.makePanel(contentView: NSView())
+    let screen = ShelfScreen(
+      displayID: 1,
+      frame: NSRect(x: 0, y: 0, width: 600, height: 700),
+      visibleFrame: NSRect(x: 0, y: 0, width: 600, height: 680),
+      isMain: true
+    )
+    let scheduler = TestEdgeShelfScheduler()
+    let point = NSPoint(x: screen.frame.midX, y: screen.frame.midY)
+    let controller = EdgeShelfController(
+      panel: panel,
+      defaults: defaults,
+      mouseLocation: { point },
+      screens: { [screen] },
+      scheduler: scheduler
+    )
+    controller.start()
+    defer { controller.stop() }
+    controller.showExplicitly()
+    scheduler.advance(by: 3.0)
+
+    defaults.set(false, forKey: ShelfWindowPreferences.autoHideKey)
+    controller.settingsDidChange()
+    defaults.set(true, forKey: ShelfWindowPreferences.autoHideKey)
+    controller.settingsDidChange()
+
+    scheduler.advance(by: 2.999)
+    XCTAssertTrue(panel.frame.intersects(screen.frame))
+    scheduler.advance(by: 0.001)
+    XCTAssertFalse(panel.frame.intersects(screen.frame))
+  }
+
+  @MainActor
   func testChangingEdgeImmediatelyRecomputesShownFrame() {
     let defaults = makeDefaults()
     let panel = ShelfPanelController.makePanel(contentView: NSView())

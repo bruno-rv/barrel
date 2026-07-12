@@ -163,6 +163,37 @@ final class EdgeShelfModelTests: XCTestCase {
     XCTAssertEqual(machine.phase, .hidden)
   }
 
+  func testDisablingAutoHideWhileShownRestartsMinimumVisibilityHold() {
+    var machine = EdgeShelfStateMachine(phase: .shown)
+
+    XCTAssertEqual(
+      machine.handle(.autoHideChanged(isEnabled: false, pointerInside: false)),
+      [.scheduleMinimumVisibility]
+    )
+    XCTAssertEqual(
+      machine.handle(.autoHideChanged(isEnabled: true, pointerInside: false)),
+      [.rememberPendingHide]
+    )
+    XCTAssertEqual(machine.phase, .shown)
+    XCTAssertEqual(machine.handle(.minimumVisibilityElapsed), [.hide])
+  }
+
+  func testDisablingAutoHideAfterOldHoldElapsedStartsFreshHold() {
+    var machine = EdgeShelfStateMachine(phase: .shown)
+    _ = machine.handle(.minimumVisibilityElapsed)
+
+    XCTAssertEqual(
+      machine.handle(.autoHideChanged(isEnabled: false, pointerInside: false)),
+      [.scheduleMinimumVisibility]
+    )
+    XCTAssertEqual(
+      machine.handle(.autoHideChanged(isEnabled: true, pointerInside: false)),
+      [.rememberPendingHide]
+    )
+    XCTAssertEqual(machine.phase, .shown)
+    XCTAssertEqual(machine.handle(.minimumVisibilityElapsed), [.hide])
+  }
+
   func testEnablingAutoHideOnlySchedulesHideWhenPointerIsOutside() {
     var outside = EdgeShelfStateMachine(phase: .shown)
     var inside = EdgeShelfStateMachine(phase: .shown)
