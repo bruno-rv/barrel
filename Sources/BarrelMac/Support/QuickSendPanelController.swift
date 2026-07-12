@@ -112,9 +112,7 @@ final class QuickSendPanelController: NSObject, NSWindowDelegate {
 
   @discardableResult
   func handleEscape() -> QuickSendModel.EscapeOutcome {
-    let outcome = model.handleEscape()
-    if outcome == .dismissPanel { orderOut() }
-    return outcome
+    QuickSendEscapeRouter.route(model: model) { orderOut() }
   }
 
   func windowDidResignKey(_ notification: Notification) {

@@ -270,6 +270,41 @@ struct QuickSendModelTests {
     #expect(exports.first?.1 == second.id)
   }
 
+  @Test func itemOnlyQueryStillOpensEveryDestinationAndExportsExactKeyboardChoice() async {
+    let shelfItem = item("Quarterly Report", kind: .file)
+    let first = RecentDestination(
+      id: "/Invoices", name: "Invoices", url: URL(fileURLWithPath: "/Invoices"),
+      bookmark: nil, lastUsedAt: Date(timeIntervalSince1970: 2)
+    )
+    let second = RecentDestination(
+      id: "/Archive", name: "Archive", url: URL(fileURLWithPath: "/Archive"),
+      bookmark: nil, lastUsedAt: Date(timeIntervalSince1970: 1)
+    )
+    var exports: [(UUID, String)] = []
+    let model = QuickSendModel(
+      finderReader: StaticFinderReader(state: .empty), items: { [shelfItem] }, history: { [] },
+      destinations: { [first, second] }, isUndoEligible: { _ in false },
+      performPrimary: { _ in },
+      exportItem: { itemID, destination in exports.append((itemID, destination.id)); return .dismiss },
+      dismiss: {}
+    )
+    model.query = "quarterly"
+    await model.refresh()
+
+    #expect(model.results.map(\.title) == ["Quarterly Report"])
+    model.performPrimary()
+
+    #expect(model.secondaryMode == .destinations(shelfItem.id))
+    #expect(model.layerResults.map(\.title) == ["Invoices", "Archive"])
+    model.moveSelection(.down)
+    model.performPrimary()
+    while model.isOperationRunning { await Task.yield() }
+
+    #expect(exports.count == 1)
+    #expect(exports.first?.0 == shelfItem.id)
+    #expect(exports.first?.1 == second.id)
+  }
+
   @Test func temporaryActionsStayBoundToItemThatOpenedActionLayer() async {
     let a = item("A", kind: .file)
     let b = item("B", kind: .file)

@@ -3,6 +3,18 @@ import Combine
 import Foundation
 
 @MainActor
+enum QuickSendEscapeRouter {
+  @discardableResult
+  static func route(
+    model: QuickSendModel, dismiss: () -> Void
+  ) -> QuickSendModel.EscapeOutcome {
+    let outcome = model.handleEscape()
+    if outcome == .dismissPanel { dismiss() }
+    return outcome
+  }
+}
+
+@MainActor
 final class QuickSendModel: ObservableObject {
   enum AsyncActionOutcome {
     case dismiss
@@ -47,6 +59,8 @@ final class QuickSendModel: ObservableObject {
   private var openHistoryAction: ((HistoryEvent) -> Bool)?
   private var revealHistoryAction: ((HistoryEvent) -> Bool)?
   private var refreshGeneration = 0
+  private var currentDestinations: [RecentDestination] = []
+  private var currentDestinationResults: [QuickSendResult] = []
 
   init(
     finderReader: FinderSelectionReading,
@@ -134,7 +148,7 @@ final class QuickSendModel: ObservableObject {
   }
 
   var selectedResult: QuickSendResult? {
-    selectedResultID.flatMap { id in results.first { $0.id == id } }
+    selectedResultID.flatMap { id in layerResults.first { $0.id == id } }
   }
 
   var finderPermissionDenied: Bool {
@@ -142,7 +156,7 @@ final class QuickSendModel: ObservableObject {
   }
 
   var layerResults: [QuickSendResult] {
-    if case .destinations = secondaryMode { return resultsInGroup(.destination) }
+    if case .destinations = secondaryMode { return currentDestinationResults }
     return results
   }
 
@@ -162,12 +176,14 @@ final class QuickSendModel: ObservableObject {
     let refreshedFinderState = await finderReader.readSelection()
     guard generation == refreshGeneration else { return }
     finderState = refreshedFinderState
+    currentDestinations = destinations()
+    currentDestinationResults = destinationResults(from: currentDestinations)
 
     let candidates = finderResults()
       + undoResults()
       + temporaryResults()
       + historyResults()
-      + destinationResults()
+      + currentDestinationResults
     results = candidates.enumerated()
       .compactMap { index, result in matchRank(for: result).map { (result, $0, index) } }
       .sorted { lhs, rhs in
@@ -217,7 +233,7 @@ final class QuickSendModel: ObservableObject {
     inlineError = nil
     if selectedResult.group == .temporary, exportItemAction != nil,
        let itemID = selectedResult.shelfItemID {
-      let destinationResults = resultsInGroup(.destination)
+      let destinationResults = currentDestinationResults
       guard !destinationResults.isEmpty else {
         inlineError = "No recent destination is available."
         return
@@ -229,7 +245,7 @@ final class QuickSendModel: ObservableObject {
     if selectedResult.group == .destination,
        case let .destinations(itemID) = secondaryMode,
        let destinationID = selectedResult.destinationID,
-       let destination = destinations().first(where: { $0.id == destinationID }),
+       let destination = currentDestinations.first(where: { $0.id == destinationID }),
        let exportItemAction {
       isOperationRunning = true
       Task { await runAsyncAction { try await exportItemAction(itemID, destination) } }
@@ -378,8 +394,8 @@ final class QuickSendModel: ObservableObject {
     }
   }
 
-  private func destinationResults() -> [QuickSendResult] {
-    destinations().map { destination in
+  private func destinationResults(from destinations: [RecentDestination]) -> [QuickSendResult] {
+    destinations.map { destination in
       QuickSendResult(
         semanticID: "destination:\(destination.id)", group: .destination,
         title: destination.name, subtitle: destination.url.path,

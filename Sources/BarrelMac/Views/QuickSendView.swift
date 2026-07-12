@@ -106,7 +106,7 @@ struct QuickSendView: View {
     case .primary: model.performPrimary()
     case .secondary: model.performSecondary()
     case .escape:
-      if model.handleEscape() == .dismissPanel { dismiss() }
+      QuickSendEscapeRouter.route(model: model, dismiss: dismiss)
     }
   }
 
