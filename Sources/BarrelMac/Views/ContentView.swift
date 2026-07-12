@@ -154,6 +154,7 @@ struct ContentView: View {
             trash: { store.trash(item) },
             restore: { store.restore(item) },
             deletePermanently: { store.deletePermanently(item) },
+            filePromiseExporter: store,
             itemProvider: { store.itemProvider(for: item) }
           )
         }
@@ -256,9 +257,25 @@ private struct ShelfTile: View {
   let trash: () -> Void
   let restore: () -> Void
   let deletePermanently: () -> Void
+  let filePromiseExporter: any ShelfFilePromiseExporting
   let itemProvider: () -> NSItemProvider
 
+  @ViewBuilder
   var body: some View {
+    if item.kind == .file || item.kind == .image {
+      FilePromiseDragSource(
+        itemID: item.id,
+        fileName: item.fileName ?? item.title,
+        exporter: filePromiseExporter
+      ) {
+        tile
+      }
+    } else {
+      tile.onDrag(itemProvider)
+    }
+  }
+
+  private var tile: some View {
     HStack(spacing: 10) {
       thumbnail
 
@@ -304,7 +321,6 @@ private struct ShelfTile: View {
     .contentShape(Rectangle())
     .onTapGesture(perform: select)
     .onTapGesture(count: 2, perform: open)
-    .onDrag(itemProvider)
     .contextMenu {
       if item.trashedAt != nil {
         Button("Restore", action: restore)

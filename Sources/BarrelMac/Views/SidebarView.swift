@@ -15,17 +15,11 @@ struct SidebarView: View {
       } else {
         List(selection: $store.selectedItemID) {
           ForEach(store.visibleItems) { item in
-            ShelfRow(
-              item: item,
-              isMarked: store.selectedIDs.contains(item.id)
-            )
+            itemRow(item)
             .tag(item.id)
             .contentShape(Rectangle())
             .onTapGesture {
               store.select(item)
-            }
-            .onDrag {
-              store.itemProvider(for: item)
             }
             .contextMenu {
               if item.trashedAt != nil {
@@ -59,6 +53,22 @@ struct SidebarView: View {
       }
     }
     .searchable(text: $store.searchText, placement: .sidebar)
+  }
+
+  @ViewBuilder
+  private func itemRow(_ item: ShelfItem) -> some View {
+    if item.kind == .file || item.kind == .image {
+      FilePromiseDragSource(
+        itemID: item.id,
+        fileName: item.fileName ?? item.title,
+        exporter: store
+      ) {
+        ShelfRow(item: item, isMarked: store.selectedIDs.contains(item.id))
+      }
+    } else {
+      ShelfRow(item: item, isMarked: store.selectedIDs.contains(item.id))
+        .onDrag { store.itemProvider(for: item) }
+    }
   }
 
   private var filterPicker: some View {

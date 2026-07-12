@@ -5,7 +5,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 @MainActor
-final class ShelfStore: ObservableObject {
+final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
   @Published private(set) var items: [ShelfItem] = []
   @Published private(set) var visibleItems: [ShelfItem] = []
   @Published var selectedIDs: Set<ShelfItem.ID> = []
@@ -296,6 +296,18 @@ final class ShelfStore: ObservableObject {
       return NSItemProvider(object: text as NSString)
     }
     return NSItemProvider(object: item.title as NSString)
+  }
+
+  func export(itemID: UUID, to directoryURL: URL) async throws -> HistoryEvent {
+    do {
+      let event = try await repository.export(itemID: itemID, to: directoryURL)
+      notifyRepositoryChange()
+      await refresh()
+      return event
+    } catch {
+      errorMessage = error.localizedDescription
+      throw error
+    }
   }
 
   func repositoryDidChange(selecting itemID: UUID? = nil) {
