@@ -4,10 +4,18 @@ import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
 
+enum ShelfViewMode: Hashable {
+  case bucket
+  case history
+  case trash
+}
+
 @MainActor
 final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
   @Published private(set) var items: [ShelfItem] = []
   @Published private(set) var visibleItems: [ShelfItem] = []
+  @Published private(set) var historyEvents: [HistoryEvent] = []
+  @Published private(set) var viewMode: ShelfViewMode = .bucket
   @Published var selectedIDs: Set<ShelfItem.ID> = []
   @Published var selectedItemID: ShelfItem.ID?
   @Published var searchText = "" { didSet { recomputeVisibleItems() } }
@@ -18,6 +26,7 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
 
   private let repository: ShelfRepository
   private let importer: ImportService
+  private let indexesSpotlight: Bool
   private let spotlightIndexer = SpotlightIndexer()
   private var fileURLsByItemID: [UUID: URL] = [:]
   private var clipboardTask: Task<Void, Never>?
@@ -28,10 +37,12 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
   init(
     repository: ShelfRepository = BarrelEnvironment.shared.repository,
     importer: ImportService? = nil,
+    indexesSpotlight: Bool = true,
     loadOnInit: Bool = true
   ) {
     self.repository = repository
     self.importer = importer ?? ImportService()
+    self.indexesSpotlight = indexesSpotlight
     if loadOnInit {
       Task { await load() }
     }
@@ -43,6 +54,48 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
 
   var liveItemCount: Int {
     items.lazy.filter { $0.trashedAt == nil && $0.deletedAt == nil }.count
+  }
+
+  func openBucket() {
+    viewMode = .bucket
+    if filter == .trash { filter = .all }
+  }
+
+  func openHistory() {
+    viewMode = .history
+  }
+
+  func openTrash() {
+    viewMode = .trash
+    filter = .trash
+  }
+
+  func undo(_ event: HistoryEvent) {
+    Task { await performUndo(event) }
+  }
+
+  func performUndo(_ event: HistoryEvent) async {
+    do {
+      _ = try await repository.undo(historyEventID: event.id)
+      notifyRepositoryChange()
+      await refresh()
+    } catch {
+      errorMessage = Self.undoMessage(for: error)
+    }
+  }
+
+  func isUndoEligible(_ event: HistoryEvent) -> Bool {
+    guard event.kind == .export, event.reversedByEventID == nil else { return false }
+    return historyEvents.first(where: {
+      $0.itemID == event.itemID && $0.kind == .export && $0.reversedByEventID == nil
+    })?.id == event.id
+  }
+
+  static func undoMessage(for error: Error) -> String {
+    guard let repositoryError = error as? RepositoryError else {
+      return error.localizedDescription
+    }
+    return repositoryError.errorDescription ?? error.localizedDescription
   }
 
   func item(with id: ShelfItem.ID) -> ShelfItem? {
@@ -330,15 +383,21 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
   }
 
   @discardableResult
-  private func refresh(
+  func refresh(
     preferredSelection: UUID? = nil,
     performsAutomaticCleanup: Bool = true
   ) async -> Bool {
     refreshGeneration += 1
     let generation = refreshGeneration
+    let temporaryItems = (try? await repository.temporarySnapshot()) ?? []
+    let history = (try? await repository.historySnapshot()) ?? []
     let snapshot = await repository.snapshot()
+    let temporaryItemIDs = Set(temporaryItems.map(\.id))
+    let displayedSnapshot = snapshot.filter {
+      temporaryItemIDs.contains($0.id) || ($0.trashedAt != nil && $0.deletedAt == nil)
+    }
     var resolvedURLs: [UUID: URL] = [:]
-    for item in snapshot {
+    for item in displayedSnapshot {
       if let url = await repository.fileURL(for: item) {
         resolvedURLs[item.id] = url
       }
@@ -346,16 +405,21 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
     let usage = (try? await repository.storageUsage()) ?? 0
     guard generation == refreshGeneration else { return false }
 
-    items = snapshot
+    items = displayedSnapshot
+    historyEvents = history
     fileURLsByItemID = resolvedURLs
     storageUsage = usage
     recomputeVisibleItems(preferredSelection: preferredSelection)
-    spotlightTask?.cancel()
-    spotlightTask = Task { [weak self] in
-      guard let self else { return }
-      let indexingError = await spotlightIndexer.update(items: snapshot)
-      guard !Task.isCancelled, let indexingError, errorMessage == nil else { return }
-      errorMessage = "Spotlight could not update the Barrel index: \(indexingError)"
+    if indexesSpotlight {
+      spotlightTask?.cancel()
+      spotlightTask = Task { [weak self] in
+        guard let self else { return }
+        let indexingError = await spotlightIndexer.update(items: displayedSnapshot.filter {
+          $0.trashedAt == nil && $0.deletedAt == nil
+        })
+        guard !Task.isCancelled, let indexingError, errorMessage == nil else { return }
+        errorMessage = "Spotlight could not update the Barrel index: \(indexingError)"
+      }
     }
 
     guard performsAutomaticCleanup else { return true }

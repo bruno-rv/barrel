@@ -24,7 +24,9 @@ struct ContentView: View {
         header
         searchAndFilters
 
-        if store.visibleItems.isEmpty {
+        if store.viewMode == .history {
+          history
+        } else if store.visibleItems.isEmpty {
           emptyShelf
         } else {
           shelfItems
@@ -112,27 +114,82 @@ struct ContentView: View {
 
   private var searchAndFilters: some View {
     VStack(spacing: 8) {
-      TextField("Search shelf", text: $store.searchText)
-        .textFieldStyle(.roundedBorder)
-
       HStack(spacing: 6) {
-        ForEach([ShelfFilter.all, .files, .images, .links, .text, .stacks, .trash]) { filter in
-          Button {
-            store.filter = filter
-          } label: {
-            Image(systemName: filter.systemImage)
-              .frame(width: 24, height: 24)
+        modeButton("Bucket", image: "tray.full", mode: .bucket, action: store.openBucket)
+        modeButton("History", image: "clock.arrow.circlepath", mode: .history, action: store.openHistory)
+        modeButton("Trash", image: "trash", mode: .trash, action: store.openTrash)
+      }
+
+      if store.viewMode == .bucket {
+        TextField("Search shelf", text: $store.searchText)
+          .textFieldStyle(.roundedBorder)
+
+        HStack(spacing: 6) {
+          ForEach([ShelfFilter.all, .files, .images, .links, .text, .stacks]) { filter in
+            Button {
+              store.filter = filter
+            } label: {
+              Image(systemName: filter.systemImage)
+                .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(store.filter == filter ? .white : .white.opacity(0.55))
+            .background(
+              Capsule()
+                .fill(store.filter == filter ? Color.white.opacity(0.18) : Color.clear)
+            )
+            .help(filter.label)
           }
-          .buttonStyle(.plain)
-          .foregroundStyle(store.filter == filter ? .white : .white.opacity(0.55))
-          .background(
-            Capsule()
-              .fill(store.filter == filter ? Color.white.opacity(0.18) : Color.clear)
-          )
-          .help(filter.label)
         }
       }
     }
+  }
+
+  private func modeButton(
+    _ title: String,
+    image: String,
+    mode: ShelfViewMode,
+    action: @escaping () -> Void
+  ) -> some View {
+    Button(action: action) {
+      Label(title, systemImage: image)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 5)
+    }
+    .buttonStyle(.plain)
+    .foregroundStyle(.white)
+    .background(
+      RoundedRectangle(cornerRadius: 7)
+        .fill(store.viewMode == mode ? Color.white.opacity(0.18) : Color.clear)
+    )
+  }
+
+  private var history: some View {
+    Group {
+      if store.historyEvents.isEmpty {
+        VStack {
+          Spacer()
+          Text("Files moved to Finder appear here for 24 hours.")
+            .font(.caption)
+            .multilineTextAlignment(.center)
+            .foregroundStyle(.white.opacity(0.58))
+          Spacer()
+        }
+      } else {
+        ScrollView {
+          LazyVStack(spacing: 8) {
+            ForEach(store.historyEvents) { event in
+              HistoryEventRow(event: event, canUndo: store.isUndoEligible(event)) {
+                store.undo(event)
+              }
+              .padding(8)
+              .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+            }
+          }
+        }
+      }
+    }
+    .foregroundStyle(.white)
   }
 
   private var shelfItems: some View {
@@ -199,7 +256,7 @@ struct ContentView: View {
       }
       .help("Paste into shelf")
 
-      if store.filter == .trash {
+      if store.viewMode == .trash {
         Button(role: .destructive) {
           store.emptyTrash()
         } label: {

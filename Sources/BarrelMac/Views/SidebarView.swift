@@ -10,7 +10,9 @@ struct SidebarView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
 
-      if store.visibleItems.isEmpty {
+      if store.viewMode == .history {
+        historyList
+      } else if store.visibleItems.isEmpty {
         EmptyShelfView(store: store)
       } else {
         List(selection: $store.selectedItemID) {
@@ -72,13 +74,74 @@ struct SidebarView: View {
   }
 
   private var filterPicker: some View {
-    Picker("Filter", selection: $store.filter) {
-      ForEach(ShelfFilter.allCases) { filter in
-        Label(filter.label, systemImage: filter.systemImage)
-          .tag(filter)
+    VStack(spacing: 8) {
+      HStack {
+        Button("Bucket") { store.openBucket() }
+        Button("History") { store.openHistory() }
+        Button("Trash") { store.openTrash() }
+      }
+      .buttonStyle(.borderless)
+
+      if store.viewMode == .bucket {
+        Picker("Filter", selection: $store.filter) {
+          ForEach(ShelfFilter.allCases.filter { $0 != .trash }) { filter in
+            Label(filter.label, systemImage: filter.systemImage)
+              .tag(filter)
+          }
+        }
+        .pickerStyle(.segmented)
       }
     }
-    .pickerStyle(.segmented)
+  }
+
+  private var historyList: some View {
+    Group {
+      if store.historyEvents.isEmpty {
+        Text("Files moved to Finder appear here for 24 hours.")
+          .font(.subheadline)
+          .foregroundStyle(.secondary)
+          .multilineTextAlignment(.center)
+          .padding()
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+      } else {
+        List(store.historyEvents) { event in
+          HistoryEventRow(event: event, canUndo: store.isUndoEligible(event)) {
+            store.undo(event)
+          }
+        }
+        .listStyle(.sidebar)
+      }
+    }
+  }
+}
+
+struct HistoryEventRow: View {
+  let event: HistoryEvent
+  let canUndo: Bool
+  let undo: () -> Void
+
+  var body: some View {
+    HStack(spacing: 10) {
+      VStack(alignment: .leading, spacing: 2) {
+        Text(event.fileName)
+          .font(.body.weight(.medium))
+          .lineLimit(1)
+        Text("\(event.sourceName) → \(event.destinationName)")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+        Text(event.timestamp, style: .relative)
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+      }
+      .help(event.destinationURL?.path ?? event.destinationName)
+
+      Spacer()
+
+      if canUndo {
+        Button("Undo", action: undo)
+      }
+    }
+    .padding(.vertical, 3)
   }
 }
 
