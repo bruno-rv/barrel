@@ -49,3 +49,40 @@ zero failures; all 33 Swift Testing tests selected with BarrelMac also passed.
 Finder Automation consent and actual first-responder behavior across process
 activation still require the plan's manual bundled-app check; unit tests cover
 the injected activation and focus scheduling seams.
+
+## Re-review fix — destination and action routing
+
+- Escape now returns an explicit `blocked`, `closedLayer`, or `dismissPanel`
+  outcome. The view and panel controller dismiss only for `dismissPanel`; the
+  controller integration test covers closing a destination layer before
+  ordering out the panel.
+- Activating a temporary file/image opens a destination layer and does not
+  export. Keyboard Return, double-click, the visible activation button, and the
+  accessibility activation action all route the exact chosen destination.
+- Destination exports retain the originating item ID even if selection changes.
+  A real store-backed multi-destination test chooses the older folder and
+  verifies that no file is written to the newer folder.
+- Temporary Open and Reveal actions use item-ID ShelfStore entry points and
+  remain bound to the result that opened the action layer. History actions keep
+  the same captured-result behavior.
+- Rows use single-click selection, double-click activation, and contained
+  accessibility children so their Open, Reveal, and primary buttons remain
+  independently interactive.
+
+TDD red evidence: the first focused run failed to compile on the absent Escape
+outcome, destination-layer mode/results, export dispatch seam, and captured item
+action APIs. After the first implementation pass, the legacy scoped-access test
+failed because it still expected automatic export; it was converted to the
+required choose-destination command path.
+
+Fresh verification:
+
+```bash
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter 'QuickSend(Model|PanelController|Action)Tests'
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter BarrelMacTests
+git diff --check
+```
+
+Results: 38 focused Quick Send tests passed; the full BarrelMac run passed 108
+XCTest tests and 38 Swift Testing tests with zero failures; `git diff --check`
+passed.

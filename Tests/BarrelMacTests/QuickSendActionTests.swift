@@ -70,12 +70,53 @@ struct QuickSendActionTests {
     model.selectedResultID = model.resultsInGroup(.temporary).first?.id
 
     model.performPrimary()
+    model.activateResult(try #require(model.layerResults.first).id)
     await waitUntil { !model.isOperationRunning }
 
     #expect(access.starts == 1)
     #expect(access.stops == 1)
     #expect(!access.isActive)
     #expect(store.liveItemCount == 0)
+  }
+
+  @Test func choosingOlderDestinationExportsOnlyToThatExactFolder() async throws {
+    let fixture = try await ActionFixture()
+    let store = fixture.store
+    let newerDestination = fixture.root.appendingPathComponent("Newer", isDirectory: true)
+    try FileManager.default.createDirectory(at: newerDestination, withIntermediateDirectories: true)
+
+    _ = await store.importURLsForQuickSend([fixture.source])
+    var item = try #require(store.items.first)
+    _ = try await store.exportForQuickSend(
+      itemID: item.id, to: fixture.destination, fileName: "OlderHistory.txt"
+    )
+    _ = await store.importURLsForQuickSend([fixture.source])
+    item = try #require(store.items.first)
+    _ = try await store.exportForQuickSend(
+      itemID: item.id, to: newerDestination, fileName: "NewerHistory.txt"
+    )
+    _ = await store.importURLsForQuickSend([fixture.source])
+    item = try #require(store.items.first)
+    let model = QuickSendModel(
+      store: store, finderReader: ActionFinderReader(state: .empty),
+      destinationResolver: RecentDestinationResolver(), dismiss: {}
+    )
+    await model.refresh()
+    model.selectedResultID = "item:\(item.id)"
+
+    model.performPrimary()
+    let olderChoice = try #require(model.layerResults.first(where: {
+      $0.subtitle == fixture.destination.path
+    }))
+    model.activateResult(olderChoice.id)
+    await waitUntil { !model.isOperationRunning }
+
+    #expect(FileManager.default.fileExists(
+      atPath: fixture.destination.appendingPathComponent("Source.txt").path
+    ))
+    #expect(!FileManager.default.fileExists(
+      atPath: newerDestination.appendingPathComponent("Source.txt").path
+    ))
   }
 
   @Test func finderImportReturnsPartialOutcomeAndRefreshesSuccessfulItems() async throws {

@@ -1,4 +1,5 @@
 import AppKit
+import BarrelCore
 import Testing
 @testable import BarrelMac
 
@@ -70,12 +71,36 @@ struct QuickSendPanelControllerTests {
   }
 
   @Test func escapeClosesSecondaryLayerBeforeOrderingOutPanel() async {
-    var dismissalCount = 0
-    let model = makeModel(dismiss: { dismissalCount += 1 })
-    let controller = QuickSendPanelController(model: model)
+    let panel = QuickSendPanelController.makePanel(contentView: NSView())
+    let model = makeModel()
+    let controller = QuickSendPanelController(model: model, panel: panel)
+    panel.orderFront(nil)
 
-    #expect(controller.handleEscape())
-    #expect(dismissalCount == 1)
+    #expect(controller.handleEscape() == .dismissPanel)
+    #expect(!panel.isVisible)
+  }
+
+  @Test func escapeCommandClosesLayerThenOrdersOutPanelThroughControllerPath() async {
+    let item = ShelfItem(title: "Source", kind: .file)
+    let destination = RecentDestination(
+      id: "/Destination", name: "Destination", url: URL(fileURLWithPath: "/Destination"),
+      bookmark: nil, lastUsedAt: .now
+    )
+    let model = QuickSendModel(
+      finderReader: EmptyFinderReader(), items: { [item] }, history: { [] },
+      destinations: { [destination] }, isUndoEligible: { _ in false },
+      performPrimary: { _ in }, exportItem: { _, _ in .dismiss }, dismiss: {}
+    )
+    let panel = QuickSendPanelController.makePanel(contentView: NSView())
+    let controller = QuickSendPanelController(model: model, panel: panel)
+    await model.refresh()
+    panel.orderFront(nil)
+    model.performPrimary()
+
+    #expect(controller.handleEscape() == .closedLayer)
+    #expect(panel.isVisible)
+    #expect(controller.handleEscape() == .dismissPanel)
+    #expect(!panel.isVisible)
   }
 
   @Test func resignKeyDismissesOnlyWhileIdle() {

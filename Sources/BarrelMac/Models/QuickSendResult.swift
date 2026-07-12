@@ -18,6 +18,9 @@ struct QuickSendResult: Identifiable, Equatable, Sendable {
   let subtitle: String?
   let searchTerms: [String]
   let finderURLs: [URL]
+  let shelfItemID: UUID?
+  let historyEventID: UUID?
+  let destinationID: RecentDestination.ID?
   let recency: Date
   let isPrimaryEnabled: Bool
   let isSecondaryEnabled: Bool
@@ -29,6 +32,9 @@ struct QuickSendResult: Identifiable, Equatable, Sendable {
     subtitle: String? = nil,
     searchTerms: [String] = [],
     finderURLs: [URL] = [],
+    shelfItemID: UUID? = nil,
+    historyEventID: UUID? = nil,
+    destinationID: RecentDestination.ID? = nil,
     recency: Date = .distantPast,
     isPrimaryEnabled: Bool,
     isSecondaryEnabled: Bool = false
@@ -40,6 +46,9 @@ struct QuickSendResult: Identifiable, Equatable, Sendable {
     self.subtitle = subtitle
     self.searchTerms = searchTerms
     self.finderURLs = finderURLs
+    self.shelfItemID = shelfItemID
+    self.historyEventID = historyEventID
+    self.destinationID = destinationID
     self.recency = recency
     self.isPrimaryEnabled = isPrimaryEnabled
     self.isSecondaryEnabled = isSecondaryEnabled

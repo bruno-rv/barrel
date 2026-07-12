@@ -16,6 +16,13 @@ final class QuickSendModel: ObservableObject {
 
   enum SecondaryMode: Equatable {
     case actions(QuickSendResult.ID)
+    case destinations(ShelfItem.ID)
+  }
+
+  enum EscapeOutcome: Equatable {
+    case blocked
+    case closedLayer
+    case dismissPanel
   }
 
   @Published var query = ""
@@ -34,6 +41,9 @@ final class QuickSendModel: ObservableObject {
   private let primaryAction: (QuickSendResult) -> Void
   private let dismissAction: () -> Void
   private var asyncPrimaryAction: ((QuickSendResult) async throws -> AsyncActionOutcome)?
+  private var exportItemAction: ((ShelfItem.ID, RecentDestination) async throws -> AsyncActionOutcome)?
+  private var openItemAction: ((ShelfItem.ID) -> Bool)?
+  private var revealItemAction: ((ShelfItem.ID) -> Bool)?
   private var openHistoryAction: ((HistoryEvent) -> Bool)?
   private var revealHistoryAction: ((HistoryEvent) -> Bool)?
   private var refreshGeneration = 0
@@ -46,6 +56,9 @@ final class QuickSendModel: ObservableObject {
     isUndoEligible: @escaping (HistoryEvent) -> Bool,
     performPrimary: @escaping (QuickSendResult) -> Void,
     performAsyncPrimary: ((QuickSendResult) async throws -> AsyncActionOutcome)? = nil,
+    exportItem: ((ShelfItem.ID, RecentDestination) async throws -> AsyncActionOutcome)? = nil,
+    openItem: ((ShelfItem.ID) -> Bool)? = nil,
+    revealItem: ((ShelfItem.ID) -> Bool)? = nil,
     openHistory: ((HistoryEvent) -> Bool)? = nil,
     revealHistory: ((HistoryEvent) -> Bool)? = nil,
     dismiss: @escaping () -> Void
@@ -57,6 +70,9 @@ final class QuickSendModel: ObservableObject {
     self.isUndoEligible = isUndoEligible
     primaryAction = performPrimary
     asyncPrimaryAction = performAsyncPrimary
+    exportItemAction = exportItem
+    openItemAction = openItem
+    revealItemAction = revealItem
     openHistoryAction = openHistory
     revealHistoryAction = revealHistory
     dismissAction = dismiss
@@ -95,22 +111,24 @@ final class QuickSendModel: ObservableObject {
         }
         return .dismiss
       case .temporary:
-        guard let item = store.items.first(where: {
-          result.semanticID == "item:\($0.id)"
-        }) else { throw QuickSendActionError("The shelf item is no longer available.") }
-        guard let destination = destinationResolver.destinations(from: store.historyEvents).first else {
-          throw QuickSendActionError("No recent destination is available.")
-        }
-        _ = try await destinationResolver.withAccess(to: destination) { url in
-          try await store.exportForQuickSend(
-            itemID: item.id, to: url, fileName: item.fileName ?? item.title
-          )
-        }
-        return .dismiss
+        throw QuickSendActionError("Choose a recent destination first.")
       case .history, .destination:
         throw QuickSendActionError("This result cannot be sent.")
       }
     }
+    exportItemAction = { itemID, destination in
+      guard let item = store.items.first(where: { $0.id == itemID }) else {
+        throw QuickSendActionError("The shelf item is no longer available.")
+      }
+      _ = try await destinationResolver.withAccess(to: destination) { url in
+        try await store.exportForQuickSend(
+          itemID: item.id, to: url, fileName: item.fileName ?? item.title
+        )
+      }
+      return .dismiss
+    }
+    openItemAction = { store.openItem(id: $0) }
+    revealItemAction = { store.revealItem(id: $0) }
     openHistoryAction = { store.openHistoryEvent($0) }
     revealHistoryAction = { store.revealHistoryEvent($0) }
   }
@@ -121,6 +139,16 @@ final class QuickSendModel: ObservableObject {
 
   var finderPermissionDenied: Bool {
     finderState == .permissionDenied
+  }
+
+  var layerResults: [QuickSendResult] {
+    if case .destinations = secondaryMode { return resultsInGroup(.destination) }
+    return results
+  }
+
+  var isChoosingDestination: Bool {
+    if case .destinations = secondaryMode { return true }
+    return false
   }
 
   func resultsInGroup(_ group: QuickSendResultGroup) -> [QuickSendResult] {
@@ -160,54 +188,89 @@ final class QuickSendModel: ObservableObject {
   }
 
   func moveSelection(_ direction: SelectionDirection) {
-    guard !results.isEmpty else {
+    let selectableResults = layerResults
+    guard !selectableResults.isEmpty else {
       selectedResultID = nil
       return
     }
     guard let selectedResultID,
-          let index = results.firstIndex(where: { $0.id == selectedResultID })
+          let index = selectableResults.firstIndex(where: { $0.id == selectedResultID })
     else {
-      self.selectedResultID = direction == .down ? results.first?.id : results.last?.id
+      self.selectedResultID = direction == .down ? selectableResults.first?.id : selectableResults.last?.id
       return
     }
     let offset = direction == .down ? 1 : -1
-    self.selectedResultID = results[(index + offset + results.count) % results.count].id
+    self.selectedResultID = selectableResults[
+      (index + offset + selectableResults.count) % selectableResults.count
+    ].id
   }
 
   func performPrimary() {
-    guard !isOperationRunning, let selectedResult, selectedResult.isPrimaryEnabled else { return }
+    guard !isOperationRunning, let selectedResult else { return }
+    let isDestinationChoice: Bool
+    if selectedResult.group == .destination, case .destinations = secondaryMode {
+      isDestinationChoice = true
+    } else {
+      isDestinationChoice = false
+    }
+    guard selectedResult.isPrimaryEnabled || isDestinationChoice else { return }
     inlineError = nil
+    if selectedResult.group == .temporary, exportItemAction != nil,
+       let itemID = selectedResult.shelfItemID {
+      let destinationResults = resultsInGroup(.destination)
+      guard !destinationResults.isEmpty else {
+        inlineError = "No recent destination is available."
+        return
+      }
+      secondaryMode = .destinations(itemID)
+      selectedResultID = destinationResults.first?.id
+      return
+    }
+    if selectedResult.group == .destination,
+       case let .destinations(itemID) = secondaryMode,
+       let destinationID = selectedResult.destinationID,
+       let destination = destinations().first(where: { $0.id == destinationID }),
+       let exportItemAction {
+      isOperationRunning = true
+      Task { await runAsyncAction { try await exportItemAction(itemID, destination) } }
+      return
+    }
     if let asyncPrimaryAction {
       isOperationRunning = true
-      Task {
-        do {
-          let outcome = try await asyncPrimaryAction(selectedResult)
-          await refresh()
-          switch outcome {
-          case .dismiss:
-            finishOperation(.success(()))
-            dismissAction()
-          case .keepOpen(let warning):
-            inlineError = warning
-            isOperationRunning = false
-          }
-        } catch {
-          finishOperation(.failure(error))
-        }
-      }
+      Task { await runAsyncAction { try await asyncPrimaryAction(selectedResult) } }
       return
     }
     primaryAction(selectedResult)
   }
 
+  func selectResult(_ id: QuickSendResult.ID) {
+    guard layerResults.contains(where: { $0.id == id }) else { return }
+    selectedResultID = id
+  }
+
+  func activateResult(_ id: QuickSendResult.ID) {
+    selectResult(id)
+    performPrimary()
+  }
+
+  @discardableResult
+  func openSelectedAction() -> Bool {
+    performCapturedAction(itemAction: openItemAction, historyAction: openHistoryAction)
+  }
+
+  @discardableResult
+  func revealSelectedAction() -> Bool {
+    performCapturedAction(itemAction: revealItemAction, historyAction: revealHistoryAction)
+  }
+
   @discardableResult
   func openSelectedHistory() -> Bool {
-    performHistoryAction(openHistoryAction)
+    openSelectedAction()
   }
 
   @discardableResult
   func revealSelectedHistory() -> Bool {
-    performHistoryAction(revealHistoryAction)
+    revealSelectedAction()
   }
 
   func performSecondary() {
@@ -216,14 +279,22 @@ final class QuickSendModel: ObservableObject {
   }
 
   @discardableResult
-  func handleEscape() -> Bool {
-    guard !isOperationRunning else { return false }
-    if secondaryMode != nil {
-      secondaryMode = nil
+  func handleEscape() -> EscapeOutcome {
+    guard !isOperationRunning else { return .blocked }
+    if let secondaryMode {
+      let restoredID: QuickSendResult.ID?
+      switch secondaryMode {
+      case .destinations(let itemID): restoredID = "item:\(itemID)"
+      case .actions(let resultID): restoredID = resultID
+      }
+      self.secondaryMode = nil
+      selectedResultID = restoredID.flatMap { id in
+        results.contains(where: { $0.id == id }) ? id : nil
+      } ?? results.first?.id
+      return .closedLayer
     } else {
-      dismissAction()
+      return .dismissPanel
     }
-    return true
   }
 
   func finishOperation(_ result: Result<Void, Error>) {
@@ -283,6 +354,7 @@ final class QuickSendModel: ObservableObject {
           semanticID: "item:\(item.id)", group: .temporary, title: item.title,
           subtitle: item.detail,
           searchTerms: [item.detail, item.text ?? "", item.kind.rawValue, item.kind.label, item.origin.rawValue],
+          shelfItemID: item.id,
           recency: item.updatedAt,
           isPrimaryEnabled: item.kind == .file || item.kind == .image,
           isSecondaryEnabled: item.kind == .file || item.kind == .image
@@ -297,6 +369,7 @@ final class QuickSendModel: ObservableObject {
         title: event.kind == .undo ? "Undid \(event.sourceName)" : event.sourceName,
         subtitle: event.destinationName,
         searchTerms: [event.kind.rawValue, event.fileName, event.destinationName],
+        historyEventID: event.id,
         recency: event.timestamp, isPrimaryEnabled: false,
         isSecondaryEnabled: event.destinationURL.map {
           FileManager.default.fileExists(atPath: $0.path)
@@ -310,8 +383,8 @@ final class QuickSendModel: ObservableObject {
       QuickSendResult(
         semanticID: "destination:\(destination.id)", group: .destination,
         title: destination.name, subtitle: destination.url.path,
-        searchTerms: [destination.url.path], recency: destination.lastUsedAt,
-        isPrimaryEnabled: false
+        searchTerms: [destination.url.path], destinationID: destination.id,
+        recency: destination.lastUsedAt, isPrimaryEnabled: false
       )
     }
   }
@@ -338,21 +411,51 @@ final class QuickSendModel: ObservableObject {
     value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
   }
 
-  private func performHistoryAction(_ action: ((HistoryEvent) -> Bool)?) -> Bool {
-    guard !isOperationRunning, let action,
+  private func performCapturedAction(
+    itemAction: ((ShelfItem.ID) -> Bool)?, historyAction: ((HistoryEvent) -> Bool)?
+  ) -> Bool {
+    guard !isOperationRunning,
           case let .actions(capturedID) = secondaryMode,
-          let capturedResult = results.first(where: {
-            $0.semanticID == capturedID && $0.group == .history
-          }),
-          let event = history().first(where: {
-            capturedResult.semanticID == "history:\($0.id)"
-          }) else { return false }
-    guard action(event) else {
-      inlineError = "The exported file is no longer available."
+          let capturedResult = results.first(where: { $0.id == capturedID }) else { return false }
+    let succeeded: Bool
+    switch capturedResult.group {
+    case .temporary:
+      guard let itemAction, let itemID = capturedResult.shelfItemID else { return false }
+      succeeded = itemAction(itemID)
+    case .history:
+      guard let historyAction, let eventID = capturedResult.historyEventID,
+            let event = history().first(where: { $0.id == eventID }) else { return false }
+      succeeded = historyAction(event)
+    default:
+      return false
+    }
+    guard succeeded else {
+      inlineError = capturedResult.group == .history
+        ? "The exported file is no longer available."
+        : "The item is no longer available."
       return false
     }
     inlineError = nil
     return true
+  }
+
+  private func runAsyncAction(
+    _ action: () async throws -> AsyncActionOutcome
+  ) async {
+    do {
+      let outcome = try await action()
+      await refresh()
+      switch outcome {
+      case .dismiss:
+        finishOperation(.success(()))
+        dismissAction()
+      case .keepOpen(let warning):
+        inlineError = warning
+        isOperationRunning = false
+      }
+    } catch {
+      finishOperation(.failure(error))
+    }
   }
 }
 

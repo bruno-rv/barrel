@@ -196,18 +196,100 @@ struct QuickSendModelTests {
     #expect(dispatched == [model.selectedResult?.semanticID].compactMap { $0 })
   }
 
-  @Test func commandReturnOpensSecondaryAndEscapeClosesLayersBeforePanel() async {
+  @Test func commandReturnOpensSecondaryAndEscapeReportsLayersBeforePanel() async {
     var dismissals = 0
     let model = makeModel(items: [item("A", kind: .file)], dismiss: { dismissals += 1 })
     await model.refresh()
 
     model.performSecondary()
     #expect(model.secondaryMode != nil)
-    #expect(model.handleEscape())
+    #expect(model.handleEscape() == .closedLayer)
     #expect(model.secondaryMode == nil)
     #expect(dismissals == 0)
-    #expect(model.handleEscape())
-    #expect(dismissals == 1)
+    #expect(model.handleEscape() == .dismissPanel)
+    #expect(dismissals == 0)
+  }
+
+  @Test func temporaryPrimaryOpensDestinationLayerWithoutDispatchingFirstDestination() async {
+    let shelfItem = item("Source", kind: .file)
+    let first = RecentDestination(
+      id: "/First", name: "First", url: URL(fileURLWithPath: "/First"),
+      bookmark: nil, lastUsedAt: Date(timeIntervalSince1970: 2)
+    )
+    let second = RecentDestination(
+      id: "/Second", name: "Second", url: URL(fileURLWithPath: "/Second"),
+      bookmark: nil, lastUsedAt: Date(timeIntervalSince1970: 1)
+    )
+    var exports: [(UUID, String)] = []
+    let model = QuickSendModel(
+      finderReader: StaticFinderReader(state: .empty), items: { [shelfItem] }, history: { [] },
+      destinations: { [first, second] }, isUndoEligible: { _ in false },
+      performPrimary: { _ in },
+      exportItem: { exports.append(($0, $1.id)); return .dismiss }, dismiss: {}
+    )
+    await model.refresh()
+
+    model.performPrimary()
+
+    #expect(model.secondaryMode == .destinations(shelfItem.id))
+    #expect(model.layerResults.map(\.title) == ["First", "Second"])
+    #expect(exports.isEmpty)
+    #expect(model.handleEscape() == .closedLayer)
+    #expect(model.selectedResultID == "item:\(shelfItem.id)")
+  }
+
+  @Test func destinationActivationExportsCapturedItemToExactChosenDestination() async {
+    let a = item("A", kind: .file)
+    let b = item("B", kind: .file)
+    let first = RecentDestination(
+      id: "/First", name: "First", url: URL(fileURLWithPath: "/First"),
+      bookmark: nil, lastUsedAt: Date(timeIntervalSince1970: 2)
+    )
+    let second = RecentDestination(
+      id: "/Second", name: "Second", url: URL(fileURLWithPath: "/Second"),
+      bookmark: nil, lastUsedAt: Date(timeIntervalSince1970: 1)
+    )
+    var exports: [(UUID, String)] = []
+    let model = QuickSendModel(
+      finderReader: StaticFinderReader(state: .empty), items: { [a, b] }, history: { [] },
+      destinations: { [first, second] }, isUndoEligible: { _ in false },
+      performPrimary: { _ in },
+      exportItem: { itemID, destination in exports.append((itemID, destination.id)); return .dismiss },
+      dismiss: {}
+    )
+    await model.refresh()
+    model.selectedResultID = "item:\(a.id)"
+    model.performPrimary()
+    model.selectedResultID = "item:\(b.id)"
+
+    model.activateResult("destination:\(second.id)")
+    while model.isOperationRunning { await Task.yield() }
+
+    #expect(exports.count == 1)
+    #expect(exports.first?.0 == a.id)
+    #expect(exports.first?.1 == second.id)
+  }
+
+  @Test func temporaryActionsStayBoundToItemThatOpenedActionLayer() async {
+    let a = item("A", kind: .file)
+    let b = item("B", kind: .file)
+    var opened: [UUID] = []
+    var revealed: [UUID] = []
+    let model = QuickSendModel(
+      finderReader: StaticFinderReader(state: .empty), items: { [a, b] }, history: { [] },
+      destinations: { [] }, isUndoEligible: { _ in false }, performPrimary: { _ in },
+      openItem: { opened.append($0); return true },
+      revealItem: { revealed.append($0); return true }, dismiss: {}
+    )
+    await model.refresh()
+    model.selectedResultID = "item:\(a.id)"
+    model.performSecondary()
+    model.selectedResultID = "item:\(b.id)"
+
+    #expect(model.openSelectedAction())
+    #expect(model.revealSelectedAction())
+    #expect(opened == [a.id])
+    #expect(revealed == [a.id])
   }
 
   @Test func informationalHistoryUsesSecondaryCapabilityIndependentlyOfPrimary() async throws {
@@ -234,7 +316,7 @@ struct QuickSendModelTests {
       #expect(dispatched.isEmpty)
       model.performSecondary()
       #expect(model.secondaryMode == .actions("history:\(event.id)"))
-      _ = model.handleEscape()
+      #expect(model.handleEscape() == .closedLayer)
     }
   }
 
@@ -310,7 +392,7 @@ struct QuickSendModelTests {
     model.performPrimary()
     #expect(model.isOperationRunning)
     model.selectedResultID = "history:\(history.id)"
-    #expect(!model.openSelectedHistory())
+    #expect(!model.openSelectedAction())
     #expect(opened.isEmpty)
     await gate.resume()
     while model.isOperationRunning { await Task.yield() }
@@ -330,7 +412,7 @@ struct QuickSendModelTests {
     let model = makeModel(items: [item("A", kind: .file)], dismiss: { dismissals += 1 })
     await model.refresh()
     model.isOperationRunning = true
-    #expect(!model.handleEscape())
+    #expect(model.handleEscape() == .blocked)
     #expect(dismissals == 0)
 
     model.finishOperation(.failure(TestFailure()))

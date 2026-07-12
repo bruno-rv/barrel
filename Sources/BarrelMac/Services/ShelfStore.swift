@@ -385,6 +385,23 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
   }
 
   @discardableResult
+  func openItem(id: ShelfItem.ID) -> Bool {
+    guard let item = item(with: id), item.trashedAt == nil, item.deletedAt == nil else { return false }
+    guard fileURL(for: item) != nil || (item.kind == .link && item.text.flatMap(URL.init(string:)) != nil)
+    else { return false }
+    open(item)
+    return true
+  }
+
+  @discardableResult
+  func revealItem(id: ShelfItem.ID) -> Bool {
+    guard let item = item(with: id), item.trashedAt == nil, item.deletedAt == nil,
+          fileURL(for: item) != nil else { return false }
+    reveal(item)
+    return true
+  }
+
+  @discardableResult
   func openHistoryEvent(_ event: HistoryEvent) -> Bool {
     guard let url = existingDestinationURL(for: event) else { return false }
     NSWorkspace.shared.open(url)

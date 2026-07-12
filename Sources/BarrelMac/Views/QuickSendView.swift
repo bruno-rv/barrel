@@ -39,7 +39,7 @@ struct QuickSendView: View {
       ScrollView {
         LazyVStack(spacing: 8) {
           ForEach(QuickSendResultGroup.allCases, id: \.rawValue) { group in
-            let results = model.resultsInGroup(group)
+            let results = model.layerResults.filter { $0.group == group }
             if !results.isEmpty {
               Section(group.title) {
                 ForEach(results) { result in resultRow(result) }
@@ -64,13 +64,26 @@ struct QuickSendView: View {
   }
 
   private func resultRow(_ result: QuickSendResult) -> some View {
-    VStack(alignment: .leading, spacing: 2) {
-      Text(result.title).fontWeight(.medium).lineLimit(1)
-      if let subtitle = result.subtitle { Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
+    VStack(alignment: .leading, spacing: 4) {
+      HStack {
+        VStack(alignment: .leading, spacing: 2) {
+          Text(result.title).fontWeight(.medium).lineLimit(1)
+          if let subtitle = result.subtitle {
+            Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+          }
+        }
+        Spacer()
+        if result.isPrimaryEnabled || (result.group == .destination && model.isChoosingDestination) {
+          Button(result.group == .temporary ? "Destinations" : "Activate") {
+            model.activateResult(result.id)
+          }
+          .buttonStyle(.borderless)
+        }
+      }
       if model.secondaryMode == .actions(result.id) {
         HStack {
-          Button("Open") { _ = model.openSelectedHistory() }
-          Button("Reveal in Finder") { _ = model.revealSelectedHistory() }
+          Button("Open") { _ = model.openSelectedAction() }
+          Button("Reveal in Finder") { _ = model.revealSelectedAction() }
         }.buttonStyle(.bordered)
       }
     }
@@ -79,8 +92,10 @@ struct QuickSendView: View {
     .background(result.id == model.selectedResultID ? Color.accentColor.opacity(0.18) : Color.clear)
     .clipShape(RoundedRectangle(cornerRadius: 7))
     .contentShape(Rectangle())
-    .onTapGesture { model.selectedResultID = result.id }
-    .accessibilityElement(children: .combine)
+    .onTapGesture(count: 2) { model.activateResult(result.id) }
+    .simultaneousGesture(TapGesture(count: 1).onEnded { model.selectResult(result.id) })
+    .accessibilityElement(children: .contain)
+    .accessibilityAction(named: "Activate") { model.activateResult(result.id) }
     .accessibilityAddTraits(result.id == model.selectedResultID ? .isSelected : [])
   }
 
@@ -91,8 +106,7 @@ struct QuickSendView: View {
     case .primary: model.performPrimary()
     case .secondary: model.performSecondary()
     case .escape:
-      if !model.handleEscape() { return }
-      if model.secondaryMode == nil { dismiss() }
+      if model.handleEscape() == .dismissPanel { dismiss() }
     }
   }
 
