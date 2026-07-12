@@ -5,26 +5,53 @@ import UniformTypeIdentifiers
 
 @MainActor
 protocol ShelfFilePromiseExporting: AnyObject {
-  func export(itemID: UUID, to directoryURL: URL) async throws -> HistoryEvent
+  func export(itemID: UUID, to directoryURL: URL, fileName: String) async throws -> HistoryEvent
+}
+
+@MainActor
+final class FilePromiseDragLifecycle {
+  private var delegate: ShelfFilePromiseDelegate?
+  private var writeInProgress = false
+  private var sessionEnded = false
+
+  func begin(delegate: ShelfFilePromiseDelegate) {
+    self.delegate = delegate
+    writeInProgress = false
+    sessionEnded = false
+  }
+
+  func promiseWriteBegan() {
+    writeInProgress = true
+  }
+
+  func promiseWriteEnded() {
+    writeInProgress = false
+    if sessionEnded { delegate = nil }
+  }
+
+  func draggingSessionEnded(operation: NSDragOperation) {
+    sessionEnded = true
+    if operation.isEmpty && !writeInProgress { delegate = nil }
+  }
 }
 
 final class ShelfFilePromiseDelegate: NSObject, NSFilePromiseProviderDelegate {
   private let itemID: UUID
   private let fileName: String
   private let exporter: any ShelfFilePromiseExporting
-  private let didEnd: @MainActor () -> Void
+  private let lifecycle: FilePromiseDragLifecycle?
 
   @MainActor
   init(
     itemID: UUID,
     fileName: String,
     exporter: any ShelfFilePromiseExporting,
-    didEnd: @escaping @MainActor () -> Void = {}
+    lifecycle: FilePromiseDragLifecycle? = nil
   ) {
     self.itemID = itemID
     self.fileName = fileName
     self.exporter = exporter
-    self.didEnd = didEnd
+    self.lifecycle = lifecycle
   }
 
   func filePromiseProvider(
@@ -40,8 +67,10 @@ final class ShelfFilePromiseDelegate: NSObject, NSFilePromiseProviderDelegate {
     completionHandler: @escaping (Error?) -> Void
   ) {
     Task { @MainActor [self] in
+      lifecycle?.promiseWriteBegan()
+      defer { lifecycle?.promiseWriteEnded() }
       do {
-        _ = try await exporter.export(itemID: itemID, to: url)
+        _ = try await exporter.export(itemID: itemID, to: url, fileName: fileName)
         completionHandler(nil)
       } catch {
         completionHandler(error)
@@ -49,12 +78,6 @@ final class ShelfFilePromiseDelegate: NSObject, NSFilePromiseProviderDelegate {
     }
   }
 
-  func filePromiseProvider(
-    _ filePromiseProvider: NSFilePromiseProvider,
-    operationEnded error: (any Error)?
-  ) {
-    Task { @MainActor [self] in didEnd() }
-  }
 }
 
 struct FilePromiseDragSource<Content: View>: NSViewRepresentable {
@@ -84,7 +107,7 @@ struct FilePromiseDragSource<Content: View>: NSViewRepresentable {
     private var fileName: String
     private weak var exporter: (any ShelfFilePromiseExporting)?
     private weak var view: NSView?
-    private var promiseDelegate: ShelfFilePromiseDelegate?
+    private let lifecycle = FilePromiseDragLifecycle()
 
     init(itemID: UUID, fileName: String, exporter: any ShelfFilePromiseExporting) {
       self.itemID = itemID
@@ -124,9 +147,9 @@ struct FilePromiseDragSource<Content: View>: NSViewRepresentable {
         itemID: itemID,
         fileName: fileName,
         exporter: exporter,
-        didEnd: { [weak self] in self?.promiseDelegate = nil }
+        lifecycle: lifecycle
       )
-      promiseDelegate = delegate
+      lifecycle.begin(delegate: delegate)
       let provider = NSFilePromiseProvider(fileType: fileType, delegate: delegate)
       let draggingItem = NSDraggingItem(pasteboardWriter: provider)
       let image = NSWorkspace.shared.icon(for: UTType(fileType) ?? .data)
@@ -143,6 +166,16 @@ struct FilePromiseDragSource<Content: View>: NSViewRepresentable {
       sourceOperationMaskFor context: NSDraggingContext
     ) -> NSDragOperation {
       context == .outsideApplication ? .copy : []
+    }
+
+    nonisolated func draggingSession(
+      _ session: NSDraggingSession,
+      endedAt screenPoint: NSPoint,
+      operation: NSDragOperation
+    ) {
+      Task { @MainActor [weak self] in
+        self?.lifecycle.draggingSessionEnded(operation: operation)
+      }
     }
   }
 }

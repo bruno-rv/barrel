@@ -38,7 +38,9 @@ final class FilePromiseDragSourceTests: XCTestCase {
     }
     await exporter.waitForCall()
 
-    XCTAssertEqual(exporter.calls, [.init(itemID: itemID, directoryURL: destination)])
+    XCTAssertEqual(exporter.calls, [
+      .init(itemID: itemID, directoryURL: destination, fileName: "asset.png")
+    ])
     XCTAssertTrue(completions.isEmpty)
 
     exporter.resume()
@@ -92,21 +94,52 @@ final class FilePromiseDragSourceTests: XCTestCase {
     await waitUntil { weakDelegate == nil }
   }
 
-  func testConstructionAndCancelledSessionDoNotExport() {
+  func testCancelledSessionWithoutWriteReleasesDelegateAndDoesNotExport() {
     let exporter = FakeExporter()
-    let delegate = ShelfFilePromiseDelegate(
+    let lifecycle = FilePromiseDragLifecycle()
+    var delegate: ShelfFilePromiseDelegate? = ShelfFilePromiseDelegate(
       itemID: UUID(),
       fileName: "asset.bin",
-      exporter: exporter
+      exporter: exporter,
+      lifecycle: lifecycle
     )
-    let provider = NSFilePromiseProvider(fileType: "public.data", delegate: delegate)
+    weak let weakDelegate = delegate
+    lifecycle.begin(delegate: delegate!)
+    delegate = nil
 
-    delegate.filePromiseProvider(
-      provider,
-      operationEnded: CocoaError(.userCancelled)
-    )
+    XCTAssertNotNil(weakDelegate)
+    lifecycle.draggingSessionEnded(operation: [])
 
+    XCTAssertNil(weakDelegate)
     XCTAssertEqual(exporter.calls.count, 0)
+  }
+
+  func testAcceptedWriteRetainsDelegateAfterSessionEndsUntilExportCompletes() async {
+    let exporter = FakeExporter(suspends: true)
+    let lifecycle = FilePromiseDragLifecycle()
+    var delegate: ShelfFilePromiseDelegate? = ShelfFilePromiseDelegate(
+      itemID: UUID(),
+      fileName: "asset.bin",
+      exporter: exporter,
+      lifecycle: lifecycle
+    )
+    weak let weakDelegate = delegate
+    let provider = NSFilePromiseProvider(fileType: "public.data", delegate: delegate!)
+
+    lifecycle.begin(delegate: delegate!)
+    delegate = nil
+    lifecycle.draggingSessionEnded(operation: .copy)
+
+    XCTAssertNotNil(weakDelegate)
+    weakDelegate!.filePromiseProvider(
+      provider,
+      writePromiseTo: URL(fileURLWithPath: "/tmp/promise-target")
+    ) { _ in }
+    await exporter.waitForCall()
+
+    XCTAssertNotNil(weakDelegate)
+    exporter.resume()
+    await waitUntil { weakDelegate == nil }
   }
 
   private func waitUntil(
@@ -128,6 +161,7 @@ private final class FakeExporter: ShelfFilePromiseExporting {
   struct Call: Equatable {
     let itemID: UUID
     let directoryURL: URL
+    let fileName: String
   }
 
   private let result: Result<HistoryEvent, Error>
@@ -143,8 +177,8 @@ private final class FakeExporter: ShelfFilePromiseExporting {
     self.suspends = suspends
   }
 
-  func export(itemID: UUID, to directoryURL: URL) async throws -> HistoryEvent {
-    calls.append(.init(itemID: itemID, directoryURL: directoryURL))
+  func export(itemID: UUID, to directoryURL: URL, fileName: String) async throws -> HistoryEvent {
+    calls.append(.init(itemID: itemID, directoryURL: directoryURL, fileName: fileName))
     if suspends {
       await withCheckedContinuation { continuation = $0 }
     }

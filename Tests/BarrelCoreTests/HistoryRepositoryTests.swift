@@ -3,18 +3,20 @@ import XCTest
 @testable import BarrelCore
 
 final class HistoryRepositoryTests: XCTestCase {
-  func testExportSelectsCollisionSafeNamePersistsLocalStateAndPreservesSyncRecords() async throws {
+  func testExportPreservesExactNamePersistsLocalStateAndPreservesSyncRecords() async throws {
     let fixture = try ExportFixture(fileName: "report.pdf", contents: "report bytes")
     defer { fixture.remove() }
-    try Data("occupied".utf8).write(to: fixture.destination.appendingPathComponent("report.pdf"))
-    try Data("occupied".utf8).write(to: fixture.destination.appendingPathComponent("report 2.pdf"))
     let before = try await fixture.repository.syncRecords()
 
-    let event = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
+    let event = try await fixture.repository.export(
+      itemID: fixture.item.id,
+      to: fixture.destination,
+      fileName: "Promised Report.pdf"
+    )
 
-    let exportedURL = fixture.destination.appendingPathComponent("report 3.pdf")
+    let exportedURL = fixture.destination.appendingPathComponent("Promised Report.pdf")
     XCTAssertEqual(event.destinationURL, exportedURL)
-    XCTAssertEqual(event.fileName, "report 3.pdf")
+    XCTAssertEqual(event.fileName, "Promised Report.pdf")
     XCTAssertEqual(try Data(contentsOf: exportedURL), Data("report bytes".utf8))
     let temporary = try await fixture.repository.temporarySnapshot()
     let after = try await fixture.repository.syncRecords()
@@ -25,6 +27,33 @@ final class HistoryRepositoryTests: XCTestCase {
     let reloadedHistory = try await reloaded.historySnapshot()
     XCTAssertEqual(reloadedTemporary, [])
     XCTAssertEqual(reloadedHistory.map(\.id), [event.id])
+  }
+
+  func testExportFailsWithoutOverwritingOrSuffixingWhenPromisedNameExists() async throws {
+    let fixture = try ExportFixture(fileName: "report.pdf", contents: "report bytes")
+    defer { fixture.remove() }
+    let promisedURL = fixture.destination.appendingPathComponent("report.pdf")
+    try Data("occupied".utf8).write(to: promisedURL)
+
+    do {
+      _ = try await fixture.repository.export(
+        itemID: fixture.item.id,
+        to: fixture.destination,
+        fileName: "report.pdf"
+      )
+      XCTFail("Expected collision failure")
+    } catch RepositoryError.exportDestinationExists(let url) {
+      XCTAssertEqual(url, promisedURL)
+    }
+
+    XCTAssertEqual(try Data(contentsOf: promisedURL), Data("occupied".utf8))
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: fixture.destination.appendingPathComponent("report 2.pdf").path
+    ))
+    let temporary = try await fixture.repository.temporarySnapshot()
+    let history = try await fixture.repository.historySnapshot()
+    XCTAssertEqual(temporary.map(\.id), [fixture.item.id])
+    XCTAssertEqual(history, [])
   }
 
   func testExportManifestFailureRemovesCopyAndKeepsItemTemporary() async throws {

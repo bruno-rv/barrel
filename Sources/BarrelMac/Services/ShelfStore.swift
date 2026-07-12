@@ -298,9 +298,9 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
     return NSItemProvider(object: item.title as NSString)
   }
 
-  func export(itemID: UUID, to directoryURL: URL) async throws -> HistoryEvent {
+  func export(itemID: UUID, to directoryURL: URL, fileName: String) async throws -> HistoryEvent {
     do {
-      let event = try await repository.export(itemID: itemID, to: directoryURL)
+      let event = try await repository.export(itemID: itemID, to: directoryURL, fileName: fileName)
       notifyRepositoryChange()
       await refresh()
       return event

@@ -108,6 +108,21 @@ public actor ShelfRepository {
   @discardableResult
   public func export(itemID: UUID, to directoryURL: URL) throws -> HistoryEvent {
     try ensureLoaded()
+    guard let item = items.first(where: { $0.id == itemID }),
+          let relativePath = item.relativePath,
+          let sourceURL = managedURL(for: relativePath) else {
+      throw RepositoryError.itemNotFound(itemID)
+    }
+    return try export(
+      itemID: itemID,
+      to: directoryURL,
+      fileName: item.fileName ?? sourceURL.lastPathComponent
+    )
+  }
+
+  @discardableResult
+  public func export(itemID: UUID, to directoryURL: URL, fileName: String) throws -> HistoryEvent {
+    try ensureLoaded()
     guard let item = items.first(where: {
       $0.id == itemID
         && $0.trashedAt == nil
@@ -124,11 +139,21 @@ public actor ShelfRepository {
       throw RepositoryError.itemNotFound(itemID)
     }
 
-    let destinationURL = uniqueExportURL(
-      in: directoryURL,
-      fileName: item.fileName ?? sourceURL.lastPathComponent
-    )
-    try fileManager.copyItem(at: sourceURL, to: destinationURL)
+    guard !fileName.isEmpty,
+          fileName != ".",
+          fileName != "..",
+          (fileName as NSString).lastPathComponent == fileName else {
+      throw RepositoryError.invalidExportFileName(fileName)
+    }
+    let destinationURL = directoryURL.appendingPathComponent(fileName, isDirectory: false)
+    do {
+      try fileManager.copyItem(at: sourceURL, to: destinationURL)
+    } catch {
+      if fileManager.fileExists(atPath: destinationURL.path) {
+        throw RepositoryError.exportDestinationExists(destinationURL)
+      }
+      throw error
+    }
     let event: HistoryEvent
     let removed: [ShelfItem]
     do {
@@ -870,22 +895,6 @@ public actor ShelfRepository {
   private func makeRelativePath(for url: URL) -> String {
     let rootPath = configuration.rootURL.standardizedFileURL.path
     return String(url.standardizedFileURL.path.dropFirst(rootPath.count + 1))
-  }
-
-  private func uniqueExportURL(in directoryURL: URL, fileName: String) -> URL {
-    let safeName = URL(fileURLWithPath: fileName).lastPathComponent
-    let candidate = directoryURL.appendingPathComponent(safeName)
-    guard fileManager.fileExists(atPath: candidate.path) else { return candidate }
-    let fileURL = URL(fileURLWithPath: safeName)
-    let ext = fileURL.pathExtension
-    let stem = fileURL.deletingPathExtension().lastPathComponent
-    var suffix = 2
-    while true {
-      let name = ext.isEmpty ? "\(stem) \(suffix)" : "\(stem) \(suffix).\(ext)"
-      let proposed = directoryURL.appendingPathComponent(name)
-      if !fileManager.fileExists(atPath: proposed.path) { return proposed }
-      suffix += 1
-    }
   }
 
   private func resolvedDestination(for event: HistoryEvent) throws -> URL {

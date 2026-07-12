@@ -74,6 +74,8 @@ public enum RepositoryError: Error, Equatable, Sendable {
   case itemNotFound(UUID)
   case invalidStack(UUID)
   case invalidSelection
+  case invalidExportFileName(String)
+  case exportDestinationExists(URL)
   case undoIneligible(UUID)
   case undoTargetMissing(URL)
   case undoTargetChanged(URL)
@@ -96,6 +98,10 @@ extension RepositoryError: LocalizedError {
       "The selected item is not a stack."
     case .invalidSelection:
       "Select at least two shelf items."
+    case .invalidExportFileName:
+      "The promised export filename is invalid."
+    case .exportDestinationExists(let url):
+      "A file named \(url.lastPathComponent) already exists at the export destination."
     case .undoIneligible:
       "This export is no longer eligible for Undo."
     case .undoTargetMissing:
