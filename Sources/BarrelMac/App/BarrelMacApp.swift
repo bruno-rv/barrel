@@ -64,6 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   let store = ShelfStore()
   private let hotKeyController = GlobalHotKeyController.shared
   private var shelfPanelController: ShelfPanelController?
+  private var quickSendPanelController: QuickSendPanelController?
   private var observers: [NSObjectProtocol] = []
 
   func applicationDidFinishLaunching(_ notification: Notification) {
@@ -71,9 +72,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ShelfWindowPreferences.migrate()
     let controller = ShelfPanelController(store: store)
     shelfPanelController = controller
+    quickSendPanelController = QuickSendPanelController(store: store)
     controller.start()
     hotKeyController.start()
     observers = [
+      NotificationCenter.default.addObserver(
+        forName: .showBarrelQuickSend,
+        object: nil,
+        queue: .main
+      ) { [weak self] _ in
+        Task { @MainActor in self?.quickSendPanelController?.show() }
+      },
       NotificationCenter.default.addObserver(
         forName: .showBarrelShelf,
         object: nil,
@@ -108,6 +117,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   func applicationWillTerminate(_ notification: Notification) {
     shelfPanelController?.stop()
     shelfPanelController = nil
+    quickSendPanelController?.orderOut()
+    quickSendPanelController = nil
     hotKeyController.stop()
     for observer in observers {
       NotificationCenter.default.removeObserver(observer)
