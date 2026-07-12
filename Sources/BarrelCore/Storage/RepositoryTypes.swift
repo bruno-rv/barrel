@@ -1,7 +1,9 @@
 import Foundation
 
 public typealias ManifestWriter = @Sendable (_ data: Data, _ destination: URL) throws -> Void
-public enum ExportFaultPoint: Sendable { case afterStaging, afterPendingCommit, afterPublish, beforeFinalCommit }
+public enum ExportFaultPoint: Sendable {
+  case afterDirectoryValidation, beforeStagedIdentity, afterStaging, afterPendingCommit, afterPublish, beforeFinalCommit
+}
 public typealias ExportFaultInjector = @Sendable (ExportFaultPoint) throws -> Void
 
 public enum ExportRecoveryPhase: Equatable, Sendable {

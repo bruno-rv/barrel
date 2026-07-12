@@ -169,18 +169,23 @@ public actor ShelfRepository {
     }
     let destinationURL = directoryURL.appendingPathComponent(fileName, isDirectory: false)
     let privateExportDirectory = directoryURL.appendingPathComponent(".barrel-export-staging", isDirectory: true)
-    try prepareExportStagingDirectory(privateExportDirectory, beside: directoryURL)
+    let directories = try openExportDirectories(destinationDirectory: directoryURL, createStaging: true)
+    defer { close(directories.staging); close(directories.destination) }
+    try configuration.exportFaultInjector(.afterDirectoryValidation)
+    try validateStagingDirectoryBinding(directories)
     let stagingName = UUID().uuidString
     let stagingURL = privateExportDirectory.appendingPathComponent(stagingName)
     let pending: PendingExport
     do {
-      try fileManager.copyItem(at: sourceURL, to: stagingURL)
-      guard try Self.hash(file: stagingURL) == contentHash else {
+      let stagedDescriptor = try copyExportSource(sourceURL, to: stagingName, in: directories.staging)
+      defer { close(stagedDescriptor) }
+      guard try Self.hash(fileDescriptor: stagedDescriptor) == contentHash else {
         throw RepositoryError.undoTargetChanged(stagingURL)
       }
       try configuration.exportFaultInjector(.afterStaging)
       let now = configuration.now()
-      let stagedIdentity = try fileIdentity(at: stagingURL)
+      try configuration.exportFaultInjector(.beforeStagedIdentity)
+      let stagedIdentity = try fileIdentity(fileDescriptor: stagedDescriptor, failureURL: stagingURL)
       let event = HistoryEvent(
         itemID: itemID,
         kind: .export,
@@ -206,7 +211,7 @@ public actor ShelfRepository {
       )
       try save(items, pendingExports: pendingExports + [pending])
     } catch {
-      try? fileManager.removeItem(at: stagingURL)
+      unlinkat(directories.staging, stagingName, 0)
       throw error
     }
     pendingExports.append(pending)
@@ -216,9 +221,12 @@ public actor ShelfRepository {
       throw RepositoryError.exportPendingRecovery(destinationURL, phase: .publicationPending)
     }
     do {
-      try publishExportExclusively(from: stagingURL, to: destinationURL)
+      try publishExportExclusively(
+        stagingName: stagingName, stagingDirectory: directories.staging,
+        destinationName: fileName, destinationDirectory: directories.destination
+      )
     } catch {
-      try? fileManager.removeItem(at: stagingURL)
+      unlinkat(directories.staging, stagingName, 0)
       if pendingExports.contains(where: { $0.id == pending.id }) {
         try? cancel(pending)
       }
@@ -235,7 +243,7 @@ public actor ShelfRepository {
       throw RepositoryError.exportPendingRecovery(destinationURL, phase: .publishedPendingFinalization)
     }
     do {
-      try finalize(pending)
+      try finalize(pending, destinationDirectory: directories.destination)
     } catch {
       throw RepositoryError.exportPendingRecovery(destinationURL, phase: .publishedPendingFinalization)
     }
@@ -260,60 +268,107 @@ public actor ShelfRepository {
     return snapshot
   }
 
-  private func prepareExportStagingDirectory(_ stagingURL: URL, beside destinationDirectory: URL) throws {
-    var stagingInfo = stat()
-    if lstat(stagingURL.path, &stagingInfo) == 0 {
-      guard (stagingInfo.st_mode & S_IFMT) == S_IFDIR else {
-        throw NSError(domain: NSPOSIXErrorDomain, code: Int(ENOTDIR))
+  private struct ExportDirectories { let destination: Int32; let staging: Int32 }
+
+  private func openExportDirectories(destinationDirectory: URL, createStaging: Bool) throws -> ExportDirectories {
+    let destination = open(destinationDirectory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+    guard destination >= 0 else {
+      throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    }
+    do {
+      if createStaging, mkdirat(destination, ".barrel-export-staging", 0o700) != 0, errno != EEXIST {
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
       }
-    } else if errno == ENOENT {
-      try fileManager.createDirectory(
-        at: stagingURL,
-        withIntermediateDirectories: false,
-        attributes: [.posixPermissions: 0o700]
-      )
-    } else {
-      throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
-    }
-    let descriptor = open(stagingURL.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
-    guard descriptor >= 0 else {
-      throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
-    }
-    defer { close(descriptor) }
-    guard fchmod(descriptor, 0o700) == 0 else {
-      throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
-    }
-    guard fstat(descriptor, &stagingInfo) == 0 else {
-      throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
-    }
-    var destinationInfo = stat()
-    guard stat(destinationDirectory.path, &destinationInfo) == 0 else {
-      throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
-    }
-    guard stagingInfo.st_dev == destinationInfo.st_dev else {
-      throw NSError(domain: NSPOSIXErrorDomain, code: Int(EXDEV))
+      let staging = openat(destination, ".barrel-export-staging", O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+      guard staging >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+      do {
+        guard fchmod(staging, 0o700) == 0 else {
+          throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        var stagingInfo = stat()
+        var destinationInfo = stat()
+        guard fstat(staging, &stagingInfo) == 0, fstat(destination, &destinationInfo) == 0 else {
+          throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        guard stagingInfo.st_dev == destinationInfo.st_dev else {
+          throw NSError(domain: NSPOSIXErrorDomain, code: Int(EXDEV))
+        }
+        return ExportDirectories(destination: destination, staging: staging)
+      } catch {
+        close(staging)
+        throw error
+      }
+    } catch {
+      close(destination)
+      throw error
     }
   }
 
-  private func publishExportExclusively(from stagingURL: URL, to destinationURL: URL) throws {
-    let result = stagingURL.withUnsafeFileSystemRepresentation { stagingPath in
-      destinationURL.withUnsafeFileSystemRepresentation { destinationPath in
-        renameatx_np(
-          AT_FDCWD,
-          stagingPath,
-          AT_FDCWD,
-          destinationPath,
-          UInt32(RENAME_EXCL)
-        )
-      }
+  private func validateStagingDirectoryBinding(_ directories: ExportDirectories) throws {
+    var openedInfo = stat()
+    var linkedInfo = stat()
+    guard fstat(directories.staging, &openedInfo) == 0,
+          fstatat(directories.destination, ".barrel-export-staging", &linkedInfo, AT_SYMLINK_NOFOLLOW) == 0,
+          (linkedInfo.st_mode & S_IFMT) == S_IFDIR,
+          openedInfo.st_dev == linkedInfo.st_dev,
+          openedInfo.st_ino == linkedInfo.st_ino else {
+      throw NSError(domain: NSPOSIXErrorDomain, code: Int(ESTALE))
     }
+  }
+
+  private func copyExportSource(_ sourceURL: URL, to name: String, in stagingDirectory: Int32) throws -> Int32 {
+    let source = open(sourceURL.path, O_RDONLY | O_NOFOLLOW)
+    guard source >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+    defer { close(source) }
+    var sourceInfo = stat()
+    guard fstat(source, &sourceInfo) == 0, (sourceInfo.st_mode & S_IFMT) == S_IFREG else {
+      throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno == 0 ? EINVAL : errno))
+    }
+    let destination = openat(stagingDirectory, name, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+    guard destination >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+    do {
+      var buffer = [UInt8](repeating: 0, count: 1_048_576)
+      while true {
+        let count = read(source, &buffer, buffer.count)
+        guard count >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        if count == 0 { break }
+        var written = 0
+        while written < count {
+          let result = buffer.withUnsafeBytes {
+            write(destination, $0.baseAddress!.advanced(by: written), count - written)
+          }
+          guard result > 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+          written += result
+        }
+      }
+      guard fsync(destination) == 0, lseek(destination, 0, SEEK_SET) >= 0 else {
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+      }
+      return destination
+    } catch {
+      close(destination)
+      unlinkat(stagingDirectory, name, 0)
+      throw error
+    }
+  }
+
+  private func publishExportExclusively(
+    stagingName: String, stagingDirectory: Int32,
+    destinationName: String, destinationDirectory: Int32
+  ) throws {
+    let result = renameatx_np(
+      stagingDirectory, stagingName, destinationDirectory, destinationName, UInt32(RENAME_EXCL)
+    )
     guard result == 0 else {
       throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
     }
   }
 
-  private func finalize(_ pending: PendingExport) throws {
-    guard isMatchingExport(at: pending.destinationURL, pending: pending) else {
+  private func finalize(_ pending: PendingExport, destinationDirectory: Int32? = nil) throws {
+    let matches = destinationDirectory.map {
+      isMatchingExport(named: pending.destinationURL.lastPathComponent, in: $0, pending: pending)
+    } ?? isMatchingExport(at: pending.destinationURL, pending: pending)
+    guard matches else {
       throw RepositoryError.undoTargetChanged(pending.destinationURL)
     }
     let updatedPending = pendingExports.filter { $0.id != pending.id }
@@ -336,24 +391,46 @@ public actor ShelfRepository {
   private func recoverPendingExports() throws {
     for pending in pendingExports {
       let stagingURL = pending.stagingURL
-      if isMatchingExport(at: pending.destinationURL, pending: pending) {
-        try? fileManager.removeItem(at: stagingURL)
-        try finalize(pending)
-      } else if !fileManager.fileExists(atPath: pending.destinationURL.path),
-                isMatchingExport(at: stagingURL, pending: pending) {
+      let destinationDirectoryURL = pending.destinationURL.deletingLastPathComponent()
+      let expectedStagingDirectory = destinationDirectoryURL
+        .appendingPathComponent(".barrel-export-staging", isDirectory: true).standardizedFileURL
+      guard stagingURL.deletingLastPathComponent().standardizedFileURL == expectedStagingDirectory,
+            !stagingURL.lastPathComponent.isEmpty,
+            (stagingURL.lastPathComponent as NSString).lastPathComponent == stagingURL.lastPathComponent,
+            !pending.destinationURL.lastPathComponent.isEmpty else {
+        try cancel(pending)
+        continue
+      }
+      guard let directories = try? openExportDirectories(
+        destinationDirectory: destinationDirectoryURL, createStaging: false
+      ) else {
+        try cancel(pending)
+        continue
+      }
+      defer { close(directories.staging); close(directories.destination) }
+      let stagingName = stagingURL.lastPathComponent
+      let destinationName = pending.destinationURL.lastPathComponent
+      if isMatchingExport(named: destinationName, in: directories.destination, pending: pending) {
+        unlinkat(directories.staging, stagingName, 0)
+        try finalize(pending, destinationDirectory: directories.destination)
+      } else if !fileExists(named: destinationName, in: directories.destination),
+                isMatchingExport(named: stagingName, in: directories.staging, pending: pending) {
         do {
-          try publishExportExclusively(from: stagingURL, to: pending.destinationURL)
-          try finalize(pending)
+          try publishExportExclusively(
+            stagingName: stagingName, stagingDirectory: directories.staging,
+            destinationName: destinationName, destinationDirectory: directories.destination
+          )
+          try finalize(pending, destinationDirectory: directories.destination)
         } catch {
-          if isMatchingExport(at: pending.destinationURL, pending: pending) {
-            try finalize(pending)
+          if isMatchingExport(named: destinationName, in: directories.destination, pending: pending) {
+            try finalize(pending, destinationDirectory: directories.destination)
           } else {
-            try? fileManager.removeItem(at: stagingURL)
+            unlinkat(directories.staging, stagingName, 0)
             try cancel(pending)
           }
         }
       } else {
-        try? fileManager.removeItem(at: stagingURL)
+        unlinkat(directories.staging, stagingName, 0)
         try cancel(pending)
       }
     }
@@ -377,6 +454,28 @@ public actor ShelfRepository {
       throw RepositoryError.undoTargetChanged(url)
     }
     return FileIdentity(systemNumber: system, fileNumber: file)
+  }
+
+  private func fileIdentity(fileDescriptor: Int32, failureURL: URL) throws -> FileIdentity {
+    var info = stat()
+    guard fstat(fileDescriptor, &info) == 0 else { throw RepositoryError.undoTargetChanged(failureURL) }
+    return FileIdentity(systemNumber: UInt64(info.st_dev), fileNumber: UInt64(info.st_ino))
+  }
+
+  private func fileExists(named name: String, in directory: Int32) -> Bool {
+    var info = stat()
+    return fstatat(directory, name, &info, AT_SYMLINK_NOFOLLOW) == 0
+  }
+
+  private func isMatchingExport(named name: String, in directory: Int32, pending: PendingExport) -> Bool {
+    let descriptor = openat(directory, name, O_RDONLY | O_NOFOLLOW)
+    guard descriptor >= 0 else { return false }
+    defer { close(descriptor) }
+    var info = stat()
+    guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+          UInt64(info.st_dev) == pending.systemNumber,
+          UInt64(info.st_ino) == pending.fileNumber else { return false }
+    return (try? Self.hash(fileDescriptor: descriptor)) == pending.contentHash
   }
 
   private func isMatchingExport(at url: URL, pending: PendingExport) -> Bool {
@@ -1051,6 +1150,21 @@ public actor ShelfRepository {
     var hasher = SHA256()
     while let data = try handle.read(upToCount: 1_048_576), !data.isEmpty {
       hasher.update(data: data)
+    }
+    return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+  }
+
+  private nonisolated static func hash(fileDescriptor: Int32) throws -> String {
+    guard lseek(fileDescriptor, 0, SEEK_SET) >= 0 else {
+      throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    }
+    var hasher = SHA256()
+    var buffer = [UInt8](repeating: 0, count: 1_048_576)
+    while true {
+      let count = read(fileDescriptor, &buffer, buffer.count)
+      guard count >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+      if count == 0 { break }
+      hasher.update(data: Data(buffer[0..<count]))
     }
     return hasher.finalize().map { String(format: "%02x", $0) }.joined()
   }

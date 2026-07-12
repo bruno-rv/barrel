@@ -301,15 +301,80 @@ final class HistoryRepositoryTests: XCTestCase {
     ))
   }
 
+  func testExportStagingDirectoryReplacementCannotRedirectCopyOrCleanup() async throws {
+    nonisolated(unsafe) var destination: URL!
+    nonisolated(unsafe) var attacker: URL!
+    nonisolated(unsafe) var validatedDirectory: URL!
+    let fixture = try ExportFixture(fileName: "report.pdf", contents: "report bytes", configuration: { root in
+      RepositoryConfiguration(rootURL: root, deviceID: "test-mac", exportFaultInjector: { point in
+        if point == .afterDirectoryValidation {
+          let staging = destination.appendingPathComponent(".barrel-export-staging", isDirectory: true)
+          validatedDirectory = destination.appendingPathComponent("validated-staging", isDirectory: true)
+          try FileManager.default.moveItem(at: staging, to: validatedDirectory)
+          try FileManager.default.createSymbolicLink(at: staging, withDestinationURL: attacker)
+        }
+      })
+    })
+    defer { fixture.remove(); try? FileManager.default.removeItem(at: attacker) }
+    destination = fixture.destination
+    attacker = fixture.root.deletingLastPathComponent()
+      .appendingPathComponent("HistoryAttacker-\(UUID())", isDirectory: true)
+    try FileManager.default.createDirectory(at: attacker, withIntermediateDirectories: false)
+    let sentinel = attacker.appendingPathComponent("keep.txt")
+    try Data("keep".utf8).write(to: sentinel)
+
+    do {
+      _ = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
+      XCTFail("Expected injected failure after staging")
+    } catch {}
+
+    XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.destination.appendingPathComponent("report.pdf").path))
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: attacker.path), ["keep.txt"])
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: validatedDirectory.path), [])
+  }
+
+  func testExportStagingDirectoryReplacementCannotRedirectCleanup() async throws {
+    nonisolated(unsafe) var destination: URL!
+    nonisolated(unsafe) var attacker: URL!
+    nonisolated(unsafe) var validatedDirectory: URL!
+    let fixture = try ExportFixture(fileName: "report.pdf", contents: "report bytes", configuration: { root in
+      RepositoryConfiguration(rootURL: root, deviceID: "test-mac", exportFaultInjector: { point in
+        guard point == .afterStaging else { return }
+        let staging = destination.appendingPathComponent(".barrel-export-staging", isDirectory: true)
+        validatedDirectory = destination.appendingPathComponent("validated-staging", isDirectory: true)
+        try FileManager.default.moveItem(at: staging, to: validatedDirectory)
+        try FileManager.default.createSymbolicLink(at: staging, withDestinationURL: attacker)
+        throw HistoryTestError.writeFailed
+      })
+    })
+    defer { fixture.remove(); try? FileManager.default.removeItem(at: attacker) }
+    destination = fixture.destination
+    attacker = fixture.root.deletingLastPathComponent()
+      .appendingPathComponent("HistoryCleanupAttacker-\(UUID())", isDirectory: true)
+    try FileManager.default.createDirectory(at: attacker, withIntermediateDirectories: false)
+    let sentinel = attacker.appendingPathComponent("keep.txt")
+    try Data("keep".utf8).write(to: sentinel)
+
+    do {
+      _ = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
+      XCTFail("Expected injected failure after staging")
+    } catch HistoryTestError.writeFailed {}
+
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: attacker.path), ["keep.txt"])
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: validatedDirectory.path), [])
+  }
+
   func testStagedIdentityFailureRemovesUnjournaledPrivateCopy() async throws {
-    let manager = StagedIdentityFailureFileManager()
     let fixture = try ExportFixture(
       fileName: "report.pdf",
       contents: "report bytes",
-      fileManager: manager
+      configuration: { root in
+        RepositoryConfiguration(rootURL: root, deviceID: "test-mac", exportFaultInjector: { point in
+          if point == .beforeStagedIdentity { throw HistoryTestError.writeFailed }
+        })
+      }
     )
     defer { fixture.remove() }
-    manager.failStagedIdentity = true
 
     do {
       _ = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
@@ -1121,17 +1186,6 @@ private final class ExportReplacementFileManager: FileManager, @unchecked Sendab
     try super.removeItem(at: dstURL)
     try Data("report bytes".utf8).write(to: dstURL)
     didReplacePublicCopy = true
-  }
-}
-
-private final class StagedIdentityFailureFileManager: FileManager, @unchecked Sendable {
-  var failStagedIdentity = false
-
-  override func attributesOfItem(atPath path: String) throws -> [FileAttributeKey: Any] {
-    if failStagedIdentity, path.contains("/.barrel-export-staging/") {
-      throw HistoryTestError.writeFailed
-    }
-    return try super.attributesOfItem(atPath: path)
   }
 }
 
