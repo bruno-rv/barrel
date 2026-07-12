@@ -175,6 +175,205 @@ final class HistoryRepositoryTests: XCTestCase {
 
     XCTAssertEqual(try Data(contentsOf: try XCTUnwrap(export.destinationURL)), Data("report bytes".utf8))
   }
+
+  func testUndoRejectsExpiredEventWithoutMutatingManifestOrManagedFile() async throws {
+    let fixture = try ExportFixture(fileName: "expired.pdf", contents: "bytes")
+    defer { fixture.remove() }
+    let export = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
+    let manifestURL = fixture.root.appendingPathComponent("shelf.json")
+    let resolvedManagedURL = await fixture.repository.fileURL(for: fixture.item)
+    let managedURL = try XCTUnwrap(resolvedManagedURL)
+
+    let clock = TestHistoryClock(export.timestamp.addingTimeInterval(86_399))
+    let expiredRepository = ShelfRepository(
+      configuration: RepositoryConfiguration(
+        rootURL: fixture.root,
+        deviceID: "test-mac",
+        now: { clock.now }
+      )
+    )
+    _ = try await expiredRepository.load()
+    let before = try Data(contentsOf: manifestURL)
+    clock.now = export.timestamp.addingTimeInterval(86_400)
+    do {
+      _ = try await expiredRepository.undo(historyEventID: export.id)
+      XCTFail("Expected expired event to be ineligible")
+    } catch RepositoryError.undoIneligible(export.id) {}
+
+    XCTAssertEqual(try Data(contentsOf: manifestURL), before)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: managedURL.path))
+    XCTAssertTrue(FileManager.default.fileExists(atPath: try XCTUnwrap(export.destinationURL).path))
+  }
+
+  func testUndoRejectsBookmarkResolvedPathMismatchBeforeFileIO() async throws {
+    let fixture = try ExportFixture(fileName: "recorded.pdf", contents: "bytes")
+    defer { fixture.remove() }
+    let export = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
+    let recordedURL = try XCTUnwrap(export.destinationURL)
+    let otherURL = fixture.destination.appendingPathComponent("other.pdf")
+    try Data("bytes".utf8).write(to: otherURL)
+    let bookmark = try otherURL.bookmarkData(options: .withSecurityScope)
+    var altered = export
+    altered.destinationBookmark = bookmark
+    let manifestURL = fixture.root.appendingPathComponent("shelf.json")
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    try encoder.encode(ManifestFixture(items: [fixture.item], exportedItemIDs: [fixture.item.id], history: [altered]))
+      .write(to: manifestURL, options: .atomic)
+    let repository = ShelfRepository(configuration: fixture.configuration)
+
+    do {
+      _ = try await repository.undo(historyEventID: export.id)
+      XCTFail("Expected bookmark/path mismatch")
+    } catch RepositoryError.undoTargetChanged(let url) {
+      XCTAssertEqual(url.standardizedFileURL.path, recordedURL.standardizedFileURL.path)
+    }
+    XCTAssertTrue(FileManager.default.fileExists(atPath: recordedURL.path))
+    XCTAssertTrue(FileManager.default.fileExists(atPath: otherURL.path))
+  }
+
+  func testUndoCommitRestoreFailureReportsRecoveryPath() async throws {
+    let failure = HistoryManifestFailureSwitch()
+    let manager = UndoFailureFileManager()
+    let fixture = try ExportFixture(
+      fileName: "restore.pdf",
+      contents: "bytes",
+      manifestWriter: { data, destination in
+        if failure.shouldFail { throw HistoryTestError.writeFailed }
+        try RepositoryConfiguration.defaultManifestWriter(data, destination)
+      },
+      fileManager: manager
+    )
+    defer { fixture.remove() }
+    let export = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
+    failure.shouldFail = true
+    manager.failRestore = true
+
+    do {
+      _ = try await fixture.repository.undo(historyEventID: export.id)
+      XCTFail("Expected rollback failure")
+    } catch RepositoryError.undoRollbackFailed(let destination, let recovery) {
+      XCTAssertEqual(
+        destination.resolvingSymlinksInPath().path,
+        try XCTUnwrap(export.destinationURL).resolvingSymlinksInPath().path
+      )
+      XCTAssertTrue(FileManager.default.fileExists(atPath: recovery.path))
+    }
+    XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(export.destinationURL).path))
+  }
+
+  func testUndoRejectsDeterministicallyInaccessibleTargetWithoutMutation() async throws {
+    let manager = UndoFailureFileManager()
+    let fixture = try ExportFixture(fileName: "inaccessible.pdf", contents: "bytes", fileManager: manager)
+    defer { fixture.remove() }
+    let export = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
+    manager.failStage = true
+
+    do {
+      _ = try await fixture.repository.undo(historyEventID: export.id)
+      XCTFail("Expected inaccessible target")
+    } catch RepositoryError.undoTargetInaccessible(let url) {
+      XCTAssertEqual(url.resolvingSymlinksInPath().path, try XCTUnwrap(export.destinationURL).resolvingSymlinksInPath().path)
+    }
+
+    XCTAssertTrue(FileManager.default.fileExists(atPath: try XCTUnwrap(export.destinationURL).path))
+    let history = try await fixture.repository.historySnapshot()
+    XCTAssertEqual(history.count, 1)
+  }
+
+  func testUndoCleanupFailureReportsPreservedRecoveryPath() async throws {
+    let manager = UndoFailureFileManager()
+    let fixture = try ExportFixture(fileName: "cleanup.pdf", contents: "bytes", fileManager: manager)
+    defer { fixture.remove() }
+    let export = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
+    manager.failUndoCleanup = true
+
+    do {
+      _ = try await fixture.repository.undo(historyEventID: export.id)
+      XCTFail("Expected cleanup failure")
+    } catch RepositoryError.undoCleanupFailed(let recovery) {
+      XCTAssertTrue(FileManager.default.fileExists(atPath: recovery.path))
+      XCTAssertEqual(try Data(contentsOf: recovery), Data("bytes".utf8))
+    }
+    XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(export.destinationURL).path))
+    let temporary = try await fixture.repository.temporarySnapshot()
+    XCTAssertEqual(temporary.map(\.id), [fixture.item.id])
+  }
+
+  func testUndoUsesLatestUnreversedExportRatherThanLatestExport() async throws {
+    let fixture = try ExportFixture(fileName: "ordering.pdf", contents: "bytes")
+    defer { fixture.remove() }
+    let older = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
+    let newerID = UUID()
+    let undoID = UUID()
+    let newer = HistoryEvent(
+      id: newerID,
+      itemID: older.itemID,
+      kind: .export,
+      sourceName: older.sourceName,
+      destinationName: older.destinationName,
+      destinationURL: older.destinationURL,
+      destinationBookmark: older.destinationBookmark,
+      fileName: older.fileName,
+      contentHash: older.contentHash,
+      timestamp: older.timestamp.addingTimeInterval(60),
+      reversedEventID: nil,
+      reversedByEventID: undoID
+    )
+    let reversed = HistoryEvent(
+      id: undoID,
+      itemID: older.itemID,
+      kind: .undo,
+      sourceName: older.destinationName,
+      destinationName: "Barrel",
+      destinationURL: older.destinationURL,
+      destinationBookmark: older.destinationBookmark,
+      fileName: older.fileName,
+      contentHash: older.contentHash,
+      timestamp: older.timestamp.addingTimeInterval(61),
+      reversedEventID: newerID,
+      reversedByEventID: nil
+    )
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    try encoder.encode(ManifestFixture(
+      items: [fixture.item],
+      exportedItemIDs: [fixture.item.id],
+      history: [older, newer, reversed]
+    )).write(to: fixture.root.appendingPathComponent("shelf.json"), options: .atomic)
+    let repository = ShelfRepository(configuration: fixture.configuration)
+
+    let undo = try await repository.undo(historyEventID: older.id)
+
+    XCTAssertEqual(undo.reversedEventID, older.id)
+  }
+
+  func testUndoConflictDoesNotCommitPendingPruning() async throws {
+    let fixture = try ExportFixture(fileName: "conflict.pdf", contents: "bytes")
+    defer { fixture.remove() }
+    let export = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
+    let manifestURL = fixture.root.appendingPathComponent("shelf.json")
+    let clock = TestHistoryClock(export.timestamp.addingTimeInterval(86_399))
+    let repository = ShelfRepository(
+      configuration: RepositoryConfiguration(
+        rootURL: fixture.root,
+        deviceID: "test-mac",
+        now: { clock.now }
+      )
+    )
+    _ = try await repository.load()
+    let before = try Data(contentsOf: manifestURL)
+    clock.now = export.timestamp.addingTimeInterval(86_400)
+
+    do {
+      _ = try await repository.undo(historyEventID: UUID())
+      XCTFail("Expected conflict")
+    } catch RepositoryError.undoIneligible {}
+
+    XCTAssertEqual(try Data(contentsOf: manifestURL), before)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: try XCTUnwrap(export.destinationURL).path))
+  }
+
   func testHistorySnapshotIsNewestFirstAndPrunesAtExactRetentionBoundary() async throws {
     let fileManager = FileManager.default
     let root = fileManager.temporaryDirectory
@@ -335,7 +534,8 @@ private struct ExportFixture {
   init(
     fileName: String,
     contents: String,
-    manifestWriter: @escaping ManifestWriter = RepositoryConfiguration.defaultManifestWriter
+    manifestWriter: @escaping ManifestWriter = RepositoryConfiguration.defaultManifestWriter,
+    fileManager: FileManager = .default
   ) throws {
     let manager = FileManager.default
     root = manager.temporaryDirectory.appendingPathComponent("HistoryRepositoryTests-\(UUID())", isDirectory: true)
@@ -346,7 +546,7 @@ private struct ExportFixture {
     try manager.createDirectory(at: source, withIntermediateDirectories: true)
     try Data(contents.utf8).write(to: source.appendingPathComponent(fileName))
     configuration = RepositoryConfiguration(rootURL: root, deviceID: "test-mac", manifestWriter: manifestWriter)
-    repository = ShelfRepository(configuration: configuration)
+    repository = ShelfRepository(configuration: configuration, fileManager: fileManager)
     let outcome = try blockingImport(repository: repository, source: source.appendingPathComponent(fileName))
     item = try XCTUnwrap(outcome.successes.first)
     try? manager.removeItem(at: source)
@@ -374,6 +574,29 @@ private final class HistoryManifestFailureSwitch: @unchecked Sendable {
 }
 
 private enum HistoryTestError: Error { case writeFailed }
+
+private final class UndoFailureFileManager: FileManager, @unchecked Sendable {
+  var failRestore = false
+  var failStage = false
+  var failUndoCleanup = false
+
+  override func moveItem(at srcURL: URL, to dstURL: URL) throws {
+    if failStage, dstURL.lastPathComponent.hasPrefix(".barrel-undo-") {
+      throw HistoryTestError.writeFailed
+    }
+    if failRestore, srcURL.lastPathComponent.hasPrefix(".barrel-undo-") {
+      throw HistoryTestError.writeFailed
+    }
+    try super.moveItem(at: srcURL, to: dstURL)
+  }
+
+  override func removeItem(at URL: URL) throws {
+    if failUndoCleanup, URL.lastPathComponent.hasPrefix(".barrel-undo-") {
+      throw HistoryTestError.writeFailed
+    }
+    try super.removeItem(at: URL)
+  }
+}
 
 private struct ManifestFixture: Codable {
   let items: [ShelfItem]

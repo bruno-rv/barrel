@@ -79,6 +79,8 @@ public enum RepositoryError: Error, Equatable, Sendable {
   case undoTargetChanged(URL)
   case undoTargetInaccessible(URL)
   case undoTargetNotRegularFile(URL)
+  case undoRollbackFailed(destination: URL, recovery: URL)
+  case undoCleanupFailed(recovery: URL)
 }
 
 extension RepositoryError: LocalizedError {
@@ -104,6 +106,10 @@ extension RepositoryError: LocalizedError {
       "The exported file is inaccessible."
     case .undoTargetNotRegularFile:
       "The export destination is no longer a regular file."
+    case .undoRollbackFailed:
+      "Undo could not restore the exported file after the shelf update failed. Recovery bytes were preserved."
+    case .undoCleanupFailed:
+      "Undo was saved, but its recovery bytes could not be removed."
     }
   }
 }

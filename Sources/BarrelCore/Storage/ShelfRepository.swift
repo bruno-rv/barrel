@@ -108,7 +108,6 @@ public actor ShelfRepository {
   @discardableResult
   public func export(itemID: UUID, to directoryURL: URL) throws -> HistoryEvent {
     try ensureLoaded()
-    try pruneHistory()
     guard let item = items.first(where: {
       $0.id == itemID
         && $0.trashedAt == nil
@@ -130,6 +129,8 @@ public actor ShelfRepository {
       fileName: item.fileName ?? sourceURL.lastPathComponent
     )
     try fileManager.copyItem(at: sourceURL, to: destinationURL)
+    let event: HistoryEvent
+    let removed: [ShelfItem]
     do {
       let destinationValues = try destinationURL.resourceValues(forKeys: [.isRegularFileKey])
       guard destinationValues.isRegularFile == true,
@@ -137,7 +138,7 @@ public actor ShelfRepository {
         throw RepositoryError.undoTargetChanged(destinationURL)
       }
       let now = configuration.now()
-      let event = HistoryEvent(
+      event = HistoryEvent(
         itemID: itemID,
         kind: .export,
         sourceName: "Barrel",
@@ -155,29 +156,38 @@ public actor ShelfRepository {
         reversedByEventID: nil
       )
       let updatedExportedIDs = exportedItemIDs.union([itemID])
-      let updatedHistory = history + [event]
-      try save(items, exportedItemIDs: updatedExportedIDs, history: updatedHistory)
-      exportedItemIDs = updatedExportedIDs
-      history = updatedHistory
-      return event
+      let pruned = prunedState(items: items, exportedItemIDs: updatedExportedIDs, history: history + [event])
+      let retainedItemIDs = Set(pruned.items.map(\.id))
+      removed = items.filter { !retainedItemIDs.contains($0.id) }
+      try save(pruned.items, exportedItemIDs: pruned.exportedItemIDs, history: pruned.history)
+      items = pruned.items
+      exportedItemIDs = pruned.exportedItemIDs
+      history = pruned.history
     } catch {
       try? fileManager.removeItem(at: destinationURL)
       throw error
     }
+    try deleteUnreferencedFiles(from: removed, remainingItems: items)
+    return event
   }
 
   @discardableResult
   public func undo(historyEventID: UUID) throws -> HistoryEvent {
     try ensureLoaded()
-    try pruneHistory()
     guard let eventIndex = history.firstIndex(where: { $0.id == historyEventID }),
           history[eventIndex].kind == .export,
-          history[eventIndex].reversedByEventID == nil else {
+          history[eventIndex].reversedByEventID == nil,
+          configuration.now().timeIntervalSince(history[eventIndex].timestamp) < configuration.historyRetention else {
       throw RepositoryError.undoIneligible(historyEventID)
     }
     let exportEvent = history[eventIndex]
     let latestExport = history
-      .filter { $0.itemID == exportEvent.itemID && $0.kind == .export }
+      .filter {
+        $0.itemID == exportEvent.itemID
+          && $0.kind == .export
+          && $0.reversedByEventID == nil
+          && configuration.now().timeIntervalSince($0.timestamp) < configuration.historyRetention
+      }
       .max { lhs, rhs in
         lhs.timestamp == rhs.timestamp
           ? lhs.id.uuidString < rhs.id.uuidString
@@ -189,6 +199,12 @@ public actor ShelfRepository {
     }
 
     let destinationURL = try resolvedDestination(for: exportEvent)
+    guard let recordedURL = exportEvent.destinationURL,
+          destinationURL.standardizedFileURL == recordedURL.standardizedFileURL else {
+      throw RepositoryError.undoTargetChanged(exportEvent.destinationURL ?? destinationURL)
+    }
+    let scoped = destinationURL.startAccessingSecurityScopedResource()
+    defer { if scoped { destinationURL.stopAccessingSecurityScopedResource() } }
     var isDirectory: ObjCBool = false
     guard fileManager.fileExists(atPath: destinationURL.path, isDirectory: &isDirectory) else {
       throw RepositoryError.undoTargetMissing(destinationURL)
@@ -197,8 +213,6 @@ public actor ShelfRepository {
           (try? destinationURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else {
       throw RepositoryError.undoTargetNotRegularFile(destinationURL)
     }
-    let scoped = destinationURL.startAccessingSecurityScopedResource()
-    defer { if scoped { destinationURL.stopAccessingSecurityScopedResource() } }
     let actualHash: String
     do {
       actualHash = try Self.hash(file: destinationURL)
@@ -230,19 +244,32 @@ public actor ShelfRepository {
       reversedEventID: exportEvent.id,
       reversedByEventID: nil
     )
-    var updatedHistory = history
-    updatedHistory[eventIndex].reversedByEventID = undoEvent.id
-    updatedHistory.append(undoEvent)
-    let updatedExportedIDs = exportedItemIDs.subtracting([exportEvent.itemID])
+    var candidateHistory = history
+    candidateHistory[eventIndex].reversedByEventID = undoEvent.id
+    candidateHistory.append(undoEvent)
+    let candidateExportedIDs = exportedItemIDs.subtracting([exportEvent.itemID])
+    let pruned = prunedState(items: items, exportedItemIDs: candidateExportedIDs, history: candidateHistory)
+    let retainedItemIDs = Set(pruned.items.map(\.id))
+    let removed = items.filter { !retainedItemIDs.contains($0.id) }
     do {
-      try save(items, exportedItemIDs: updatedExportedIDs, history: updatedHistory)
+      try save(pruned.items, exportedItemIDs: pruned.exportedItemIDs, history: pruned.history)
     } catch {
-      try? fileManager.moveItem(at: stagingURL, to: destinationURL)
+      do {
+        try fileManager.moveItem(at: stagingURL, to: destinationURL)
+      } catch {
+        throw RepositoryError.undoRollbackFailed(destination: recordedURL, recovery: stagingURL)
+      }
       throw error
     }
-    exportedItemIDs = updatedExportedIDs
-    history = updatedHistory
-    try? fileManager.removeItem(at: stagingURL)
+    items = pruned.items
+    exportedItemIDs = pruned.exportedItemIDs
+    history = pruned.history
+    do {
+      try fileManager.removeItem(at: stagingURL)
+    } catch {
+      throw RepositoryError.undoCleanupFailed(recovery: stagingURL)
+    }
+    try deleteUnreferencedFiles(from: removed, remainingItems: items)
     return undoEvent
   }
 
