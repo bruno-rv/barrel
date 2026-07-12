@@ -4,6 +4,11 @@ public typealias ManifestWriter = @Sendable (_ data: Data, _ destination: URL) t
 public enum ExportFaultPoint: Sendable { case afterStaging, afterPendingCommit, afterPublish, beforeFinalCommit }
 public typealias ExportFaultInjector = @Sendable (ExportFaultPoint) throws -> Void
 
+public enum ExportRecoveryPhase: Equatable, Sendable {
+  case publicationPending
+  case publishedPendingFinalization
+}
+
 public struct RepositoryConfiguration: Sendable {
   public static let defaultManifestWriter: ManifestWriter = { data, destination in
     try data.write(to: destination, options: .atomic)
@@ -81,7 +86,7 @@ public enum RepositoryError: Error, Equatable, Sendable {
   case invalidSelection
   case invalidExportFileName(String)
   case exportDestinationExists(URL)
-  case exportPendingRecovery(URL)
+  case exportPendingRecovery(URL, phase: ExportRecoveryPhase)
   case undoIneligible(UUID)
   case undoTargetMissing(URL)
   case undoTargetChanged(URL)
@@ -108,8 +113,13 @@ extension RepositoryError: LocalizedError {
       "The promised export filename is invalid."
     case .exportDestinationExists(let url):
       "A file named \(url.lastPathComponent) already exists at the export destination."
-    case .exportPendingRecovery:
-      "The export was published, but Barrel must finish recording it on the next launch."
+    case .exportPendingRecovery(_, let phase):
+      switch phase {
+      case .publicationPending:
+        "The export is pending publication and Barrel will complete it on the next launch."
+      case .publishedPendingFinalization:
+        "The export was published, but Barrel must finish recording it on the next launch."
+      }
     case .undoIneligible:
       "This export is no longer eligible for Undo."
     case .undoTargetMissing:

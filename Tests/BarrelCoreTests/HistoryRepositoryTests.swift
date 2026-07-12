@@ -259,6 +259,70 @@ final class HistoryRepositoryTests: XCTestCase {
     XCTAssertEqual(history, [])
   }
 
+  func testExportCorrectsExistingPrivateStagingDirectoryPermissions() async throws {
+    let fixture = try ExportFixture(fileName: "report.pdf", contents: "report bytes")
+    defer { fixture.remove() }
+    let staging = fixture.destination.appendingPathComponent(".barrel-export-staging", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: staging,
+      withIntermediateDirectories: false,
+      attributes: [.posixPermissions: 0o777]
+    )
+
+    _ = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
+
+    let permissions = try XCTUnwrap(
+      FileManager.default.attributesOfItem(atPath: staging.path)[.posixPermissions] as? NSNumber
+    )
+    XCTAssertEqual(permissions.intValue & 0o777, 0o700)
+  }
+
+  func testExportRejectsSymlinkedPrivateStagingDirectoryWithoutTouchingTarget() async throws {
+    let fixture = try ExportFixture(fileName: "report.pdf", contents: "report bytes")
+    defer { fixture.remove() }
+    let target = fixture.root.appendingPathComponent("attacker-target", isDirectory: true)
+    let sentinel = target.appendingPathComponent("keep.txt")
+    try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false)
+    try Data("keep".utf8).write(to: sentinel)
+    let staging = fixture.destination.appendingPathComponent(".barrel-export-staging", isDirectory: true)
+    try FileManager.default.createSymbolicLink(at: staging, withDestinationURL: target)
+
+    do {
+      _ = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
+      XCTFail("Expected unsafe staging directory rejection")
+    } catch {
+      // The concrete filesystem error is secondary to rejecting before copying.
+    }
+
+    XCTAssertEqual(try Data(contentsOf: sentinel), Data("keep".utf8))
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: target.path), ["keep.txt"])
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: fixture.destination.appendingPathComponent("report.pdf").path
+    ))
+  }
+
+  func testStagedIdentityFailureRemovesUnjournaledPrivateCopy() async throws {
+    let manager = StagedIdentityFailureFileManager()
+    let fixture = try ExportFixture(
+      fileName: "report.pdf",
+      contents: "report bytes",
+      fileManager: manager
+    )
+    defer { fixture.remove() }
+    manager.failStagedIdentity = true
+
+    do {
+      _ = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
+      XCTFail("Expected staged identity failure")
+    } catch HistoryTestError.writeFailed {}
+
+    let staging = fixture.destination.appendingPathComponent(".barrel-export-staging", isDirectory: true)
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: staging.path), [])
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: fixture.destination.appendingPathComponent("report.pdf").path
+    ))
+  }
+
   func testExportFinalManifestFailureLeavesPublishedCopyRecoverableOnRestart() async throws {
     let failure = HistoryManifestFailureSwitch()
     let fixture = try ExportFixture(
@@ -279,7 +343,7 @@ final class HistoryRepositoryTests: XCTestCase {
     do {
       _ = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
       XCTFail("Expected recoverable finalization failure")
-    } catch RepositoryError.exportPendingRecovery(let destination) {
+    } catch RepositoryError.exportPendingRecovery(let destination, _) {
       XCTAssertEqual(destination, fixture.destination.appendingPathComponent("report.pdf"))
     }
 
@@ -315,12 +379,70 @@ final class HistoryRepositoryTests: XCTestCase {
     try await assertCrashRecovery(at: .afterPendingCommit)
   }
 
+  func testPendingPublicationImmediatelyRemovesItemFromTemporarySnapshotAndBlocksRetry() async throws {
+    let fixture = try ExportFixture(fileName: "report.pdf", contents: "report bytes", configuration: { root in
+      RepositoryConfiguration(rootURL: root, deviceID: "test-mac", exportFaultInjector: { point in
+        if point == .afterPendingCommit { throw HistoryTestError.writeFailed }
+      })
+    })
+    defer { fixture.remove() }
+
+    do {
+      _ = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
+      XCTFail("Expected pending publication")
+    } catch RepositoryError.exportPendingRecovery {}
+
+    let pendingSnapshot = try await fixture.repository.temporarySnapshot()
+    XCTAssertTrue(pendingSnapshot.isEmpty)
+    do {
+      _ = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
+      XCTFail("Expected retry to be blocked")
+    } catch RepositoryError.itemNotFound(fixture.item.id) {}
+  }
+
   func testCrashAfterPublishFinalizesExactlyOnce() async throws {
     try await assertCrashRecovery(at: .afterPublish)
   }
 
   func testCrashBeforeFinalCommitFinalizesExactlyOnce() async throws {
     try await assertCrashRecovery(at: .beforeFinalCommit)
+  }
+
+  func testPendingRecoveryMessagesDistinguishPublicationPhase() async throws {
+    let beforePublish = try ExportFixture(fileName: "before.pdf", contents: "before", configuration: { root in
+      RepositoryConfiguration(rootURL: root, deviceID: "test-mac", exportFaultInjector: { point in
+        if point == .afterPendingCommit { throw HistoryTestError.writeFailed }
+      })
+    })
+    defer { beforePublish.remove() }
+    let afterPublish = try ExportFixture(fileName: "after.pdf", contents: "after", configuration: { root in
+      RepositoryConfiguration(rootURL: root, deviceID: "test-mac", exportFaultInjector: { point in
+        if point == .beforeFinalCommit { throw HistoryTestError.writeFailed }
+      })
+    })
+    defer { afterPublish.remove() }
+
+    let beforeMessage = await pendingRecoveryMessage(from: beforePublish)
+    let afterMessage = await pendingRecoveryMessage(from: afterPublish)
+
+    XCTAssertEqual(
+      beforeMessage,
+      "The export is pending publication and Barrel will complete it on the next launch."
+    )
+    XCTAssertEqual(
+      afterMessage,
+      "The export was published, but Barrel must finish recording it on the next launch."
+    )
+  }
+
+  private func pendingRecoveryMessage(from fixture: ExportFixture) async -> String? {
+    do {
+      _ = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
+      XCTFail("Expected pending recovery")
+      return nil
+    } catch {
+      return error.localizedDescription
+    }
   }
 
   private func assertCrashRecovery(at faultPoint: ExportFaultPoint) async throws {
@@ -368,7 +490,7 @@ final class HistoryRepositoryTests: XCTestCase {
     do {
       _ = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
       XCTFail("Expected recoverable rollback failure")
-    } catch RepositoryError.exportPendingRecovery(let destination) {
+    } catch RepositoryError.exportPendingRecovery(let destination, _) {
       XCTAssertEqual(destination, promisedURL)
     } catch {
       XCTFail("Unexpected error: \(error)")
@@ -412,7 +534,7 @@ final class HistoryRepositoryTests: XCTestCase {
     do {
       _ = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
       XCTFail("Expected recoverable rollback failure")
-    } catch RepositoryError.exportPendingRecovery(let destination) {
+    } catch RepositoryError.exportPendingRecovery(let destination, _) {
       XCTAssertEqual(destination, promisedURL)
     } catch {
       XCTFail("Unexpected error: \(error)")
@@ -999,6 +1121,17 @@ private final class ExportReplacementFileManager: FileManager, @unchecked Sendab
     try super.removeItem(at: dstURL)
     try Data("report bytes".utf8).write(to: dstURL)
     didReplacePublicCopy = true
+  }
+}
+
+private final class StagedIdentityFailureFileManager: FileManager, @unchecked Sendable {
+  var failStagedIdentity = false
+
+  override func attributesOfItem(atPath path: String) throws -> [FileAttributeKey: Any] {
+    if failStagedIdentity, path.contains("/.barrel-export-staging/") {
+      throw HistoryTestError.writeFailed
+    }
+    return try super.attributesOfItem(atPath: path)
   }
 }
 

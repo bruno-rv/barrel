@@ -107,14 +107,18 @@ public actor ShelfRepository {
   public func temporarySnapshot() throws -> [ShelfItem] {
     try ensureLoaded()
     try pruneHistory()
+    let pendingItemIDs = Set(pendingExports.map(\.item.id))
     let canonical = items.filter {
       !exportedItemIDs.contains($0.id)
+        && !pendingItemIDs.contains($0.id)
         && localItemSnapshots[$0.id] == nil
         && $0.trashedAt == nil
         && $0.deletedAt == nil
         && $0.relativePath != nil
     }
-    let restored = localItemSnapshots.values.filter { !exportedItemIDs.contains($0.id) }
+    let restored = localItemSnapshots.values.filter {
+      !exportedItemIDs.contains($0.id) && !pendingItemIDs.contains($0.id)
+    }
     return canonical + restored
   }
 
@@ -165,51 +169,51 @@ public actor ShelfRepository {
     }
     let destinationURL = directoryURL.appendingPathComponent(fileName, isDirectory: false)
     let privateExportDirectory = directoryURL.appendingPathComponent(".barrel-export-staging", isDirectory: true)
-    try fileManager.createDirectory(at: privateExportDirectory, withIntermediateDirectories: true,
-                                    attributes: [.posixPermissions: 0o700])
+    try prepareExportStagingDirectory(privateExportDirectory, beside: directoryURL)
     let stagingName = UUID().uuidString
     let stagingURL = privateExportDirectory.appendingPathComponent(stagingName)
+    let pending: PendingExport
     do {
       try fileManager.copyItem(at: sourceURL, to: stagingURL)
       guard try Self.hash(file: stagingURL) == contentHash else {
         throw RepositoryError.undoTargetChanged(stagingURL)
       }
       try configuration.exportFaultInjector(.afterStaging)
+      let now = configuration.now()
+      let stagedIdentity = try fileIdentity(at: stagingURL)
+      let event = HistoryEvent(
+        itemID: itemID,
+        kind: .export,
+        sourceName: "Barrel",
+        destinationName: directoryURL.lastPathComponent,
+        destinationURL: destinationURL,
+        destinationBookmark: try? destinationURL.bookmarkData(
+          options: .withSecurityScope,
+          includingResourceValuesForKeys: nil,
+          relativeTo: nil
+        ),
+        fileName: destinationURL.lastPathComponent,
+        contentHash: contentHash,
+        timestamp: now,
+        reversedEventID: nil,
+        reversedByEventID: nil
+      )
+      pending = PendingExport(
+        id: UUID(), item: item, stagingURL: stagingURL,
+        destinationURL: destinationURL, contentHash: contentHash,
+        systemNumber: stagedIdentity.systemNumber, fileNumber: stagedIdentity.fileNumber,
+        event: event
+      )
+      try save(items, pendingExports: pendingExports + [pending])
     } catch {
       try? fileManager.removeItem(at: stagingURL)
       throw error
     }
-    let now = configuration.now()
-    let stagedIdentity = try fileIdentity(at: stagingURL)
-    let event = HistoryEvent(
-      itemID: itemID,
-      kind: .export,
-      sourceName: "Barrel",
-      destinationName: directoryURL.lastPathComponent,
-      destinationURL: destinationURL,
-      destinationBookmark: try? destinationURL.bookmarkData(
-        options: .withSecurityScope,
-        includingResourceValuesForKeys: nil,
-        relativeTo: nil
-      ),
-      fileName: destinationURL.lastPathComponent,
-      contentHash: contentHash,
-      timestamp: now,
-      reversedEventID: nil,
-      reversedByEventID: nil
-    )
-    let pending = PendingExport(
-      id: UUID(), item: item, stagingURL: stagingURL,
-      destinationURL: destinationURL, contentHash: contentHash,
-      systemNumber: stagedIdentity.systemNumber, fileNumber: stagedIdentity.fileNumber,
-      event: event
-    )
-    try save(items, pendingExports: pendingExports + [pending])
     pendingExports.append(pending)
     do {
       try configuration.exportFaultInjector(.afterPendingCommit)
     } catch {
-      throw RepositoryError.exportPendingRecovery(destinationURL)
+      throw RepositoryError.exportPendingRecovery(destinationURL, phase: .publicationPending)
     }
     do {
       try publishExportExclusively(from: stagingURL, to: destinationURL)
@@ -228,18 +232,19 @@ public actor ShelfRepository {
       try configuration.exportFaultInjector(.afterPublish)
       try configuration.exportFaultInjector(.beforeFinalCommit)
     } catch {
-      throw RepositoryError.exportPendingRecovery(destinationURL)
+      throw RepositoryError.exportPendingRecovery(destinationURL, phase: .publishedPendingFinalization)
     }
     do {
       try finalize(pending)
     } catch {
-      throw RepositoryError.exportPendingRecovery(destinationURL)
+      throw RepositoryError.exportPendingRecovery(destinationURL, phase: .publishedPendingFinalization)
     }
-    return event
+    return pending.event
   }
 
   private func exportableItem(id: UUID) -> ShelfItem? {
     guard !exportedItemIDs.contains(id),
+          !pendingExports.contains(where: { $0.item.id == id }),
           let canonical = items.first(where: { $0.id == id }) else {
       return nil
     }
@@ -253,6 +258,41 @@ public actor ShelfRepository {
       return nil
     }
     return snapshot
+  }
+
+  private func prepareExportStagingDirectory(_ stagingURL: URL, beside destinationDirectory: URL) throws {
+    var stagingInfo = stat()
+    if lstat(stagingURL.path, &stagingInfo) == 0 {
+      guard (stagingInfo.st_mode & S_IFMT) == S_IFDIR else {
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(ENOTDIR))
+      }
+    } else if errno == ENOENT {
+      try fileManager.createDirectory(
+        at: stagingURL,
+        withIntermediateDirectories: false,
+        attributes: [.posixPermissions: 0o700]
+      )
+    } else {
+      throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    }
+    let descriptor = open(stagingURL.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+    guard descriptor >= 0 else {
+      throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    }
+    defer { close(descriptor) }
+    guard fchmod(descriptor, 0o700) == 0 else {
+      throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    }
+    guard fstat(descriptor, &stagingInfo) == 0 else {
+      throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    }
+    var destinationInfo = stat()
+    guard stat(destinationDirectory.path, &destinationInfo) == 0 else {
+      throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    }
+    guard stagingInfo.st_dev == destinationInfo.st_dev else {
+      throw NSError(domain: NSPOSIXErrorDomain, code: Int(EXDEV))
+    }
   }
 
   private func publishExportExclusively(from stagingURL: URL, to destinationURL: URL) throws {

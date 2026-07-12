@@ -371,6 +371,13 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
       notifyRepositoryChange()
       await refresh()
       return event
+    } catch let error as RepositoryError {
+      if case .exportPendingRecovery = error {
+        notifyRepositoryChange()
+        await refresh()
+      }
+      errorMessage = error.localizedDescription
+      throw error
     } catch {
       errorMessage = error.localizedDescription
       throw error

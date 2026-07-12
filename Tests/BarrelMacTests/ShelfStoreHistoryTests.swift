@@ -172,6 +172,43 @@ final class ShelfStoreHistoryTests: XCTestCase {
     XCTAssertEqual(syncAfterSecondUndo, syncBeforeReexport)
   }
 
+  func testPublishedPendingExportRefreshesImmediatelyBlocksRetryAndRecoversExactlyOnce() async throws {
+    let fault = ExportFaultOnce(.beforeFinalCommit)
+    let fixture = try await Fixture(exportFaultInjector: { point in try fault.inject(point) })
+    let store = ShelfStore(repository: fixture.repository, indexesSpotlight: false, loadOnInit: false)
+    await store.refresh()
+    let item = try XCTUnwrap(store.visibleItems.first)
+
+    do {
+      _ = try await store.export(itemID: item.id, to: fixture.destination, fileName: "Pending.txt")
+      XCTFail("Expected pending finalization")
+    } catch RepositoryError.exportPendingRecovery(_, let phase) {
+      XCTAssertEqual(phase, .publishedPendingFinalization)
+    }
+
+    XCTAssertTrue(store.visibleItems.isEmpty)
+    XCTAssertEqual(
+      store.errorMessage,
+      "The export was published, but Barrel must finish recording it on the next launch."
+    )
+    do {
+      _ = try await store.export(itemID: item.id, to: fixture.destination, fileName: "Duplicate.txt")
+      XCTFail("Expected duplicate retry to be blocked")
+    } catch RepositoryError.itemNotFound(item.id) {}
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: fixture.destination.appendingPathComponent("Duplicate.txt").path
+    ))
+
+    let recovered = try await fixture.recoveredState()
+    XCTAssertTrue(recovered.temporary.isEmpty)
+    XCTAssertEqual(recovered.history.map(\.itemID), [item.id])
+    XCTAssertEqual(Set(recovered.history.map(\.id)).count, 1)
+    XCTAssertEqual(
+      try Data(contentsOf: fixture.destination.appendingPathComponent("Pending.txt")),
+      Data("contents".utf8)
+    )
+  }
+
   func testCleanupFailedUndoRefreshesCommittedStateAndShowsWarning() async throws {
     let manager = UndoCleanupFailureFileManager()
     let fixture = try await Fixture(fileManager: manager)
@@ -257,7 +294,10 @@ private final class Fixture: @unchecked Sendable {
   private let clock = Clock()
   private(set) var undoEventID: UUID?
 
-  init(fileManager: FileManager = .default) async throws {
+  init(
+    fileManager: FileManager = .default,
+    exportFaultInjector: @escaping ExportFaultInjector = { _ in }
+  ) async throws {
     root = FileManager.default.temporaryDirectory
       .appendingPathComponent("ShelfStoreHistoryTests-\(UUID().uuidString)", isDirectory: true)
     source = root.appendingPathComponent("Source.txt")
@@ -269,7 +309,8 @@ private final class Fixture: @unchecked Sendable {
       rootURL: root.appendingPathComponent("Repository", isDirectory: true),
       deviceID: "test",
       historyRetention: 24 * 60 * 60,
-      now: { [clock] in clock.now }
+      now: { [clock] in clock.now },
+      exportFaultInjector: exportFaultInjector
     ), fileManager: fileManager)
     _ = try await repository.load()
     _ = await repository.importFiles([source], origin: .imported, expiresAt: nil)
@@ -302,6 +343,17 @@ private final class Fixture: @unchecked Sendable {
     return tombstone
   }
 
+  func recoveredState() async throws -> (temporary: [ShelfItem], history: [HistoryEvent]) {
+    let recovered = ShelfRepository(configuration: RepositoryConfiguration(
+      rootURL: root.appendingPathComponent("Repository", isDirectory: true),
+      deviceID: "test",
+      historyRetention: 24 * 60 * 60,
+      now: { [clock] in clock.now }
+    ))
+    _ = try await recovered.load()
+    return (try await recovered.temporarySnapshot(), try await recovered.historySnapshot())
+  }
+
   static func unloadedRepository() -> ShelfRepository {
     ShelfRepository(configuration: RepositoryConfiguration(
       rootURL: FileManager.default.temporaryDirectory
@@ -325,3 +377,19 @@ private final class UndoCleanupFailureFileManager: FileManager, @unchecked Senda
 private final class Clock: @unchecked Sendable {
   var now = Date(timeIntervalSince1970: 1_700_000_000)
 }
+
+private final class ExportFaultOnce: @unchecked Sendable {
+  private let point: ExportFaultPoint
+  private var hasFailed = false
+
+  init(_ point: ExportFaultPoint) { self.point = point }
+
+  func inject(_ candidate: ExportFaultPoint) throws {
+    if candidate == point, !hasFailed {
+      hasFailed = true
+      throw StoreHistoryTestError.injectedFailure
+    }
+  }
+}
+
+private enum StoreHistoryTestError: Error { case injectedFailure }
