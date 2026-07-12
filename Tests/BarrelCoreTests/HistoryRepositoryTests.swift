@@ -259,29 +259,173 @@ final class HistoryRepositoryTests: XCTestCase {
     XCTAssertEqual(history, [])
   }
 
-  func testExportManifestFailureRemovesCopyAndKeepsItemTemporary() async throws {
+  func testExportFinalManifestFailureLeavesPublishedCopyRecoverableOnRestart() async throws {
     let failure = HistoryManifestFailureSwitch()
     let fixture = try ExportFixture(
       fileName: "report.pdf",
       contents: "report bytes",
       manifestWriter: { data, destination in
-        if failure.shouldFail { throw HistoryTestError.writeFailed }
+        if failure.failNextWrite {
+          failure.failNextWrite = false
+          throw HistoryTestError.writeFailed
+        }
         try RepositoryConfiguration.defaultManifestWriter(data, destination)
       }
     )
     defer { fixture.remove() }
     _ = try await fixture.repository.load()
-    failure.shouldFail = true
+    failure.failOnWriteNumber = failure.writeCount + 2
 
     do {
       _ = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
-      XCTFail("Expected manifest failure")
-    } catch HistoryTestError.writeFailed {}
+      XCTFail("Expected recoverable finalization failure")
+    } catch RepositoryError.exportPendingRecovery(let destination) {
+      XCTAssertEqual(destination, fixture.destination.appendingPathComponent("report.pdf"))
+    }
 
+    XCTAssertEqual(try Data(contentsOf: fixture.destination.appendingPathComponent("report.pdf")), Data("report bytes".utf8))
+    let recovered = ShelfRepository(configuration: fixture.configuration)
+    _ = try await recovered.load()
+    let recoveredTemporary = try await recovered.temporarySnapshot()
+    let recoveredHistory = try await recovered.historySnapshot()
+    XCTAssertTrue(recoveredTemporary.isEmpty)
+    XCTAssertEqual(recoveredHistory.map(\.itemID), [fixture.item.id])
+  }
+
+  func testCrashAfterStagingLeavesNoPublicFileOrPendingExport() async throws {
+    let fixture = try ExportFixture(fileName: "report.pdf", contents: "report bytes", configuration: { root in
+      RepositoryConfiguration(rootURL: root, deviceID: "test-mac", exportFaultInjector: { point in
+        if point == .afterStaging { throw HistoryTestError.writeFailed }
+      })
+    })
+    defer { fixture.remove() }
+    _ = try await fixture.repository.load()
+    do {
+      _ = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
+      XCTFail("Expected injected crash")
+    } catch HistoryTestError.writeFailed {}
     XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.destination.appendingPathComponent("report.pdf").path))
-    failure.shouldFail = false
-    let temporary = try await fixture.repository.temporarySnapshot()
-    XCTAssertEqual(temporary.map(\.id), [fixture.item.id])
+    let recovered = ShelfRepository(configuration: RepositoryConfiguration(rootURL: fixture.root, deviceID: "test-mac"))
+    _ = try await recovered.load()
+    let recoveredHistory = try await recovered.historySnapshot()
+    XCTAssertEqual(recoveredHistory.count, 0)
+  }
+
+  func testCrashAfterPendingCommitResumesPublishExactlyOnce() async throws {
+    try await assertCrashRecovery(at: .afterPendingCommit)
+  }
+
+  func testCrashAfterPublishFinalizesExactlyOnce() async throws {
+    try await assertCrashRecovery(at: .afterPublish)
+  }
+
+  func testCrashBeforeFinalCommitFinalizesExactlyOnce() async throws {
+    try await assertCrashRecovery(at: .beforeFinalCommit)
+  }
+
+  private func assertCrashRecovery(at faultPoint: ExportFaultPoint) async throws {
+    let fixture = try ExportFixture(fileName: "report.pdf", contents: "report bytes", configuration: { root in
+      RepositoryConfiguration(rootURL: root, deviceID: "test-mac", exportFaultInjector: { point in
+        if point == faultPoint { throw HistoryTestError.writeFailed }
+      })
+    })
+    defer { fixture.remove() }
+    _ = try await fixture.repository.load()
+    do {
+      _ = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
+      XCTFail("Expected recoverable injected crash")
+    } catch RepositoryError.exportPendingRecovery {}
+    let recovered = ShelfRepository(configuration: RepositoryConfiguration(rootURL: fixture.root, deviceID: "test-mac"))
+    _ = try await recovered.load()
+    let history = try await recovered.historySnapshot()
+    XCTAssertEqual(history.map(\.itemID), [fixture.item.id])
+    XCTAssertEqual(Set(history.map(\.id)).count, 1)
+    XCTAssertEqual(try Data(contentsOf: fixture.destination.appendingPathComponent("report.pdf")), Data("report bytes".utf8))
+  }
+
+  func testExportManifestFailurePreservesReplacementAtDestination() async throws {
+    let failure = HistoryManifestFailureSwitch()
+    nonisolated(unsafe) var promisedURL: URL!
+    let fixture = try ExportFixture(
+      fileName: "report.pdf",
+      contents: "report bytes",
+      manifestWriter: { data, destination in
+        if failure.failNextWrite {
+          try FileManager.default.removeItem(at: promisedURL)
+          try Data("replacement bytes".utf8).write(to: promisedURL)
+          throw HistoryTestError.writeFailed
+        }
+        try RepositoryConfiguration.defaultManifestWriter(data, destination)
+      }
+    )
+    defer { fixture.remove() }
+    promisedURL = fixture.destination.appendingPathComponent("report.pdf")
+    _ = try await fixture.repository.load()
+    let originalTemporary = try await fixture.repository.temporarySnapshot()
+    let originalHistory = try await fixture.repository.historySnapshot()
+    failure.failOnWriteNumber = failure.writeCount + 2
+
+    do {
+      _ = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
+      XCTFail("Expected recoverable rollback failure")
+    } catch RepositoryError.exportPendingRecovery(let destination) {
+      XCTAssertEqual(destination, promisedURL)
+    } catch {
+      XCTFail("Unexpected error: \(error)")
+    }
+
+    XCTAssertEqual(try Data(contentsOf: promisedURL), Data("replacement bytes".utf8))
+    let recovered = ShelfRepository(configuration: fixture.configuration)
+    _ = try await recovered.load()
+    let temporary = try await recovered.temporarySnapshot()
+    let history = try await recovered.historySnapshot()
+    XCTAssertEqual(temporary.map(\.id), originalTemporary.map(\.id))
+    XCTAssertEqual(history, originalHistory)
+  }
+
+  func testExportBindsRollbackIdentityBeforePublishingDestination() async throws {
+    let failure = HistoryManifestFailureSwitch()
+    let manager = ExportReplacementFileManager()
+    nonisolated(unsafe) var promisedURL: URL!
+    manager.publicFileName = "report.pdf"
+    let fixture = try ExportFixture(
+      fileName: "report.pdf",
+      contents: "report bytes",
+      manifestWriter: { data, destination in
+        if failure.failNextWrite {
+          if !manager.didReplacePublicCopy {
+            try FileManager.default.removeItem(at: promisedURL)
+            try Data("report bytes".utf8).write(to: promisedURL)
+          }
+          throw HistoryTestError.writeFailed
+        }
+        try RepositoryConfiguration.defaultManifestWriter(data, destination)
+      },
+      fileManager: manager
+    )
+    defer { fixture.remove() }
+    promisedURL = fixture.destination.appendingPathComponent("report.pdf")
+    manager.publicDestination = promisedURL
+    _ = try await fixture.repository.load()
+    failure.failOnWriteNumber = failure.writeCount + 2
+
+    do {
+      _ = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
+      XCTFail("Expected recoverable rollback failure")
+    } catch RepositoryError.exportPendingRecovery(let destination) {
+      XCTAssertEqual(destination, promisedURL)
+    } catch {
+      XCTFail("Unexpected error: \(error)")
+    }
+
+    XCTAssertEqual(try Data(contentsOf: promisedURL), Data("report bytes".utf8))
+    XCTAssertFalse(manager.copiedDirectlyToPublicDestination)
+    let recovered = ShelfRepository(configuration: fixture.configuration)
+    _ = try await recovered.load()
+    let recoveredTemporary = try await recovered.temporarySnapshot()
+    let recoveredHistory = try await recovered.historySnapshot()
+    XCTAssertEqual(recoveredTemporary.map(\.id), [fixture.item.id])
+    XCTAssertTrue(recoveredHistory.isEmpty)
   }
 
   func testExportOfDeduplicatedItemKeepsManagedFileForLiveDuplicate() async throws {
@@ -805,6 +949,16 @@ private func blockingImport(repository: ShelfRepository, source: URL) throws -> 
 
 private final class HistoryManifestFailureSwitch: @unchecked Sendable {
   var shouldFail = false
+  var failOnWriteNumber: Int?
+  private(set) var writeCount = 0
+
+  var failNextWrite: Bool {
+    get {
+      writeCount += 1
+      return shouldFail || failOnWriteNumber == writeCount
+    }
+    set {}
+  }
 }
 
 private enum HistoryTestError: Error { case writeFailed }
@@ -829,6 +983,22 @@ private final class UndoFailureFileManager: FileManager, @unchecked Sendable {
       throw HistoryTestError.writeFailed
     }
     try super.removeItem(at: URL)
+  }
+}
+
+private final class ExportReplacementFileManager: FileManager, @unchecked Sendable {
+  var publicDestination: URL?
+  var publicFileName: String?
+  private(set) var copiedDirectlyToPublicDestination = false
+  private(set) var didReplacePublicCopy = false
+
+  override func copyItem(at srcURL: URL, to dstURL: URL) throws {
+    try super.copyItem(at: srcURL, to: dstURL)
+    guard dstURL == publicDestination, dstURL.lastPathComponent == publicFileName else { return }
+    copiedDirectlyToPublicDestination = true
+    try super.removeItem(at: dstURL)
+    try Data("report bytes".utf8).write(to: dstURL)
+    didReplacePublicCopy = true
   }
 }
 

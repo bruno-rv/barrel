@@ -469,7 +469,7 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
     let liveVisibleIDs = Set(
       visibleItems.lazy.filter { $0.trashedAt == nil && $0.deletedAt == nil }.map(\.id)
     )
-    selectedIDs.formIntersection(liveVisibleIDs)
+    selectedIDs.formIntersection(liveVisibleIDs.subtracting(localOverlayItemIDs))
     if viewMode == .history {
       selectedIDs = []
       selectedItemID = nil

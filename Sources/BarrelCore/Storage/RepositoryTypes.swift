@@ -1,6 +1,8 @@
 import Foundation
 
 public typealias ManifestWriter = @Sendable (_ data: Data, _ destination: URL) throws -> Void
+public enum ExportFaultPoint: Sendable { case afterStaging, afterPendingCommit, afterPublish, beforeFinalCommit }
+public typealias ExportFaultInjector = @Sendable (ExportFaultPoint) throws -> Void
 
 public struct RepositoryConfiguration: Sendable {
   public static let defaultManifestWriter: ManifestWriter = { data, destination in
@@ -14,6 +16,7 @@ public struct RepositoryConfiguration: Sendable {
   public let historyRetention: TimeInterval
   public let now: @Sendable () -> Date
   public let manifestWriter: ManifestWriter
+  public let exportFaultInjector: ExportFaultInjector
 
   public init(
     rootURL: URL,
@@ -22,7 +25,8 @@ public struct RepositoryConfiguration: Sendable {
     trashRetention: TimeInterval = 604_800,
     historyRetention: TimeInterval = 86_400,
     now: @escaping @Sendable () -> Date = { Date() },
-    manifestWriter: @escaping ManifestWriter = RepositoryConfiguration.defaultManifestWriter
+    manifestWriter: @escaping ManifestWriter = RepositoryConfiguration.defaultManifestWriter,
+    exportFaultInjector: @escaping ExportFaultInjector = { _ in }
   ) {
     self.rootURL = rootURL
     self.deviceID = deviceID
@@ -31,6 +35,7 @@ public struct RepositoryConfiguration: Sendable {
     self.historyRetention = historyRetention
     self.now = now
     self.manifestWriter = manifestWriter
+    self.exportFaultInjector = exportFaultInjector
   }
 }
 
@@ -76,6 +81,7 @@ public enum RepositoryError: Error, Equatable, Sendable {
   case invalidSelection
   case invalidExportFileName(String)
   case exportDestinationExists(URL)
+  case exportPendingRecovery(URL)
   case undoIneligible(UUID)
   case undoTargetMissing(URL)
   case undoTargetChanged(URL)
@@ -102,6 +108,8 @@ extension RepositoryError: LocalizedError {
       "The promised export filename is invalid."
     case .exportDestinationExists(let url):
       "A file named \(url.lastPathComponent) already exists at the export destination."
+    case .exportPendingRecovery:
+      "The export was published, but Barrel must finish recording it on the next launch."
     case .undoIneligible:
       "This export is no longer eligible for Undo."
     case .undoTargetMissing:

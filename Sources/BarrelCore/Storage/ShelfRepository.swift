@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 
 public actor ShelfRepository {
@@ -8,6 +9,7 @@ public actor ShelfRepository {
   private var exportedItemIDs: Set<UUID> = []
   private var localItemSnapshots: [UUID: ShelfItem] = [:]
   private var history: [HistoryEvent] = []
+  private var pendingExports: [PendingExport] = []
   private var quotaBytes: Int64
   private var isLoaded = false
 
@@ -38,6 +40,7 @@ public actor ShelfRepository {
       exportedItemIDs = []
       localItemSnapshots = [:]
       history = []
+      pendingExports = []
       try clearStaging()
       try removeOrphans()
       isLoaded = true
@@ -56,7 +59,8 @@ public actor ShelfRepository {
           items: try decoder.decode([ShelfItem].self, from: data),
           exportedItemIDs: [],
           localItemSnapshots: [:],
-          history: []
+          history: [],
+          pendingExports: []
         )
       }
     } catch {
@@ -68,11 +72,17 @@ public actor ShelfRepository {
       throw RepositoryError.corruptManifest
     }
 
+    items = decoded.items
+    exportedItemIDs = decoded.exportedItemIDs
+    localItemSnapshots = decoded.localItemSnapshots
+    history = decoded.history
+    pendingExports = decoded.pendingExports
+    try recoverPendingExports()
     let pruned = prunedState(
-      items: decoded.items,
-      exportedItemIDs: decoded.exportedItemIDs,
-      localItemSnapshots: decoded.localItemSnapshots,
-      history: decoded.history
+      items: items,
+      exportedItemIDs: exportedItemIDs,
+      localItemSnapshots: localItemSnapshots,
+      history: history
     )
     try save(
       pruned.items,
@@ -154,65 +164,77 @@ public actor ShelfRepository {
       throw RepositoryError.invalidExportFileName(fileName)
     }
     let destinationURL = directoryURL.appendingPathComponent(fileName, isDirectory: false)
+    let privateExportDirectory = directoryURL.appendingPathComponent(".barrel-export-staging", isDirectory: true)
+    try fileManager.createDirectory(at: privateExportDirectory, withIntermediateDirectories: true,
+                                    attributes: [.posixPermissions: 0o700])
+    let stagingName = UUID().uuidString
+    let stagingURL = privateExportDirectory.appendingPathComponent(stagingName)
     do {
-      try fileManager.copyItem(at: sourceURL, to: destinationURL)
+      try fileManager.copyItem(at: sourceURL, to: stagingURL)
+      guard try Self.hash(file: stagingURL) == contentHash else {
+        throw RepositoryError.undoTargetChanged(stagingURL)
+      }
+      try configuration.exportFaultInjector(.afterStaging)
     } catch {
-      if fileManager.fileExists(atPath: destinationURL.path) {
+      try? fileManager.removeItem(at: stagingURL)
+      throw error
+    }
+    let now = configuration.now()
+    let stagedIdentity = try fileIdentity(at: stagingURL)
+    let event = HistoryEvent(
+      itemID: itemID,
+      kind: .export,
+      sourceName: "Barrel",
+      destinationName: directoryURL.lastPathComponent,
+      destinationURL: destinationURL,
+      destinationBookmark: try? destinationURL.bookmarkData(
+        options: .withSecurityScope,
+        includingResourceValuesForKeys: nil,
+        relativeTo: nil
+      ),
+      fileName: destinationURL.lastPathComponent,
+      contentHash: contentHash,
+      timestamp: now,
+      reversedEventID: nil,
+      reversedByEventID: nil
+    )
+    let pending = PendingExport(
+      id: UUID(), item: item, stagingURL: stagingURL,
+      destinationURL: destinationURL, contentHash: contentHash,
+      systemNumber: stagedIdentity.systemNumber, fileNumber: stagedIdentity.fileNumber,
+      event: event
+    )
+    try save(items, pendingExports: pendingExports + [pending])
+    pendingExports.append(pending)
+    do {
+      try configuration.exportFaultInjector(.afterPendingCommit)
+    } catch {
+      throw RepositoryError.exportPendingRecovery(destinationURL)
+    }
+    do {
+      try publishExportExclusively(from: stagingURL, to: destinationURL)
+    } catch {
+      try? fileManager.removeItem(at: stagingURL)
+      if pendingExports.contains(where: { $0.id == pending.id }) {
+        try? cancel(pending)
+      }
+      let cocoaError = error as NSError
+      if cocoaError.domain == NSPOSIXErrorDomain, cocoaError.code == Int(EEXIST) {
         throw RepositoryError.exportDestinationExists(destinationURL)
       }
       throw error
     }
-    let event: HistoryEvent
-    let removed: [ShelfItem]
     do {
-      let destinationValues = try destinationURL.resourceValues(forKeys: [.isRegularFileKey])
-      guard destinationValues.isRegularFile == true,
-            try Self.hash(file: destinationURL) == contentHash else {
-        throw RepositoryError.undoTargetChanged(destinationURL)
-      }
-      let now = configuration.now()
-      event = HistoryEvent(
-        itemID: itemID,
-        kind: .export,
-        sourceName: "Barrel",
-        destinationName: directoryURL.lastPathComponent,
-        destinationURL: destinationURL,
-        destinationBookmark: try? destinationURL.bookmarkData(
-          options: .withSecurityScope,
-          includingResourceValuesForKeys: nil,
-          relativeTo: nil
-        ),
-        fileName: destinationURL.lastPathComponent,
-        contentHash: contentHash,
-        timestamp: now,
-        reversedEventID: nil,
-        reversedByEventID: nil
-      )
-      let updatedExportedIDs = exportedItemIDs.union([itemID])
-      let updatedSnapshots = localItemSnapshots.merging([itemID: item]) { _, exported in exported }
-      let pruned = prunedState(
-        items: items,
-        exportedItemIDs: updatedExportedIDs,
-        localItemSnapshots: updatedSnapshots,
-        history: history + [event]
-      )
-      let retainedItemIDs = Set(pruned.items.map(\.id))
-      removed = items.filter { !retainedItemIDs.contains($0.id) }
-      try save(
-        pruned.items,
-        exportedItemIDs: pruned.exportedItemIDs,
-        localItemSnapshots: pruned.localItemSnapshots,
-        history: pruned.history
-      )
-      items = pruned.items
-      exportedItemIDs = pruned.exportedItemIDs
-      localItemSnapshots = pruned.localItemSnapshots
-      history = pruned.history
+      try configuration.exportFaultInjector(.afterPublish)
+      try configuration.exportFaultInjector(.beforeFinalCommit)
     } catch {
-      try? fileManager.removeItem(at: destinationURL)
-      throw error
+      throw RepositoryError.exportPendingRecovery(destinationURL)
     }
-    try deleteUnreferencedFiles(from: removed, remainingItems: items)
+    do {
+      try finalize(pending)
+    } catch {
+      throw RepositoryError.exportPendingRecovery(destinationURL)
+    }
     return event
   }
 
@@ -231,6 +253,98 @@ public actor ShelfRepository {
       return nil
     }
     return snapshot
+  }
+
+  private func publishExportExclusively(from stagingURL: URL, to destinationURL: URL) throws {
+    let result = stagingURL.withUnsafeFileSystemRepresentation { stagingPath in
+      destinationURL.withUnsafeFileSystemRepresentation { destinationPath in
+        renameatx_np(
+          AT_FDCWD,
+          stagingPath,
+          AT_FDCWD,
+          destinationPath,
+          UInt32(RENAME_EXCL)
+        )
+      }
+    }
+    guard result == 0 else {
+      throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    }
+  }
+
+  private func finalize(_ pending: PendingExport) throws {
+    guard isMatchingExport(at: pending.destinationURL, pending: pending) else {
+      throw RepositoryError.undoTargetChanged(pending.destinationURL)
+    }
+    let updatedPending = pendingExports.filter { $0.id != pending.id }
+    let pruned = prunedState(
+      items: items,
+      exportedItemIDs: exportedItemIDs.union([pending.item.id]),
+      localItemSnapshots: localItemSnapshots.merging([pending.item.id: pending.item]) { _, value in value },
+      history: history.contains(where: { $0.id == pending.event.id }) ? history : history + [pending.event]
+    )
+    try save(pruned.items, exportedItemIDs: pruned.exportedItemIDs,
+             localItemSnapshots: pruned.localItemSnapshots, history: pruned.history,
+             pendingExports: updatedPending)
+    items = pruned.items
+    exportedItemIDs = pruned.exportedItemIDs
+    localItemSnapshots = pruned.localItemSnapshots
+    history = pruned.history
+    pendingExports = updatedPending
+  }
+
+  private func recoverPendingExports() throws {
+    for pending in pendingExports {
+      let stagingURL = pending.stagingURL
+      if isMatchingExport(at: pending.destinationURL, pending: pending) {
+        try? fileManager.removeItem(at: stagingURL)
+        try finalize(pending)
+      } else if !fileManager.fileExists(atPath: pending.destinationURL.path),
+                isMatchingExport(at: stagingURL, pending: pending) {
+        do {
+          try publishExportExclusively(from: stagingURL, to: pending.destinationURL)
+          try finalize(pending)
+        } catch {
+          if isMatchingExport(at: pending.destinationURL, pending: pending) {
+            try finalize(pending)
+          } else {
+            try? fileManager.removeItem(at: stagingURL)
+            try cancel(pending)
+          }
+        }
+      } else {
+        try? fileManager.removeItem(at: stagingURL)
+        try cancel(pending)
+      }
+    }
+  }
+
+  private func cancel(_ pending: PendingExport) throws {
+    let updated = pendingExports.filter { $0.id != pending.id }
+    try save(items, pendingExports: updated)
+    pendingExports = updated
+  }
+
+  private struct FileIdentity {
+    let systemNumber: UInt64
+    let fileNumber: UInt64
+  }
+
+  private func fileIdentity(at url: URL) throws -> FileIdentity {
+    let attributes = try fileManager.attributesOfItem(atPath: url.path)
+    guard let system = (attributes[.systemNumber] as? NSNumber)?.uint64Value,
+          let file = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value else {
+      throw RepositoryError.undoTargetChanged(url)
+    }
+    return FileIdentity(systemNumber: system, fileNumber: file)
+  }
+
+  private func isMatchingExport(at url: URL, pending: PendingExport) -> Bool {
+    guard (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { return false }
+    guard let identity = try? fileIdentity(at: url),
+          identity.systemNumber == pending.systemNumber,
+          identity.fileNumber == pending.fileNumber else { return false }
+    return (try? Self.hash(file: url)) == pending.contentHash
   }
 
   @discardableResult
@@ -762,7 +876,8 @@ public actor ShelfRepository {
     _ items: [ShelfItem],
     exportedItemIDs: Set<UUID>? = nil,
     localItemSnapshots: [UUID: ShelfItem]? = nil,
-    history: [HistoryEvent]? = nil
+    history: [HistoryEvent]? = nil,
+    pendingExports: [PendingExport]? = nil
   ) throws {
     let encoder = JSONEncoder()
     encoder.dateEncodingStrategy = .iso8601
@@ -770,7 +885,8 @@ public actor ShelfRepository {
       items: items,
       exportedItemIDs: exportedItemIDs ?? self.exportedItemIDs,
       localItemSnapshots: localItemSnapshots ?? self.localItemSnapshots,
-      history: history ?? self.history
+      history: history ?? self.history,
+      pendingExports: pendingExports ?? self.pendingExports
     )
     let data = try encoder.encode(manifest)
     try configuration.manifestWriter(data, manifestURL)
@@ -1112,21 +1228,24 @@ private struct RepositoryManifest: Codable {
   var exportedItemIDs: Set<UUID>
   var localItemSnapshots: [UUID: ShelfItem]
   var history: [HistoryEvent]
+  var pendingExports: [PendingExport]
 
   private enum CodingKeys: String, CodingKey {
-    case items, exportedItemIDs, localItemSnapshots, history
+    case items, exportedItemIDs, localItemSnapshots, history, pendingExports
   }
 
   init(
     items: [ShelfItem],
     exportedItemIDs: Set<UUID>,
     localItemSnapshots: [UUID: ShelfItem],
-    history: [HistoryEvent]
+    history: [HistoryEvent],
+    pendingExports: [PendingExport] = []
   ) {
     self.items = items
     self.exportedItemIDs = exportedItemIDs
     self.localItemSnapshots = localItemSnapshots
     self.history = history
+    self.pendingExports = pendingExports
   }
 
   init(from decoder: Decoder) throws {
@@ -1142,5 +1261,17 @@ private struct RepositoryManifest: Codable {
           .map { ($0.id, $0) }
       )
     history = try container.decode([HistoryEvent].self, forKey: .history)
+    pendingExports = try container.decodeIfPresent([PendingExport].self, forKey: .pendingExports) ?? []
   }
+}
+
+private struct PendingExport: Codable, Equatable {
+  let id: UUID
+  let item: ShelfItem
+  let stagingURL: URL
+  let destinationURL: URL
+  let contentHash: String
+  let systemNumber: UInt64
+  let fileNumber: UInt64
+  let event: HistoryEvent
 }

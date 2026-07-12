@@ -128,6 +128,20 @@ final class ShelfStoreHistoryTests: XCTestCase {
     XCTAssertEqual(sync.map(\.item), [tombstone])
   }
 
+  func testRemoteTombstoneUndoClearsMutationSelectionForLocalOverlay() async throws {
+    let fixture = try await Fixture()
+    let store = ShelfStore(repository: fixture.repository, indexesSpotlight: false, loadOnInit: false)
+    await store.refresh()
+    let item = try XCTUnwrap(store.visibleItems.first)
+    store.toggleSelection(for: item)
+    let export = try await fixture.export(fileName: "Overlay.txt")
+    _ = try await fixture.applyRemoteTombstone(after: export)
+
+    await store.performUndo(export)
+
+    XCTAssertTrue(store.selectedIDs.isEmpty)
+  }
+
   func testRemoteTombstoneUndoOverlayCanBeReexportedThroughStore() async throws {
     let fixture = try await Fixture()
     let export = try await fixture.export(fileName: "Overlay.txt")
