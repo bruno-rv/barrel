@@ -18,13 +18,13 @@ struct QuickSendActionTests {
       dismiss: { dismissals += 1 }
     )
     await model.refresh()
-    model.query = "keep"
+    model.setQuery(fixture.source.lastPathComponent)
 
     model.performPrimary()
     await waitUntil { !model.isOperationRunning }
 
     #expect(dismissals == 0)
-    #expect(model.query == "keep")
+    #expect(model.query == fixture.source.lastPathComponent)
     #expect(model.inlineError != nil)
   }
 
@@ -186,7 +186,7 @@ struct QuickSendActionTests {
       store: store, finderReader: ActionFinderReader(state: .empty),
       destinationResolver: RecentDestinationResolver(), dismiss: { dismissals += 1 }
     )
-    model.query = "txt"
+    model.setQuery("txt")
     await model.refresh()
     model.selectedResultID = try #require(model.resultsInGroup(.undoLatest).first).id
 

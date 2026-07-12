@@ -19,7 +19,7 @@ struct QuickSendModelTests {
       history: [history], destinations: [destination], isUndoEligible: { $0.id == history.id }
     )
 
-    model.query = "rep"
+    model.setQuery("rep")
     await model.refresh()
 
     #expect(model.results.map(\.group) == [
@@ -36,8 +36,7 @@ struct QuickSendModelTests {
     await model.refresh()
     #expect(model.resultsInGroup(.temporary).map(\.title) == ["Résumé", "Notes"])
 
-    model.query = "resume image clipboard"
-    await model.refresh()
+    model.setQuery("resume image clipboard")
     #expect(model.resultsInGroup(.temporary).map(\.title) == ["Résumé"])
   }
 
@@ -180,6 +179,62 @@ struct QuickSendModelTests {
     #expect(firstID != secondID)
   }
 
+  @Test func queryFiltersCapturedFinderHistoryAndDestinationSnapshotsWithoutRefreshingSources() async {
+    let finderURL = URL(fileURLWithPath: "/Finder/Hold.txt")
+    let replacementURL = URL(fileURLWithPath: "/Finder/Replacement.txt")
+    let reader = RecordingFinderReader(states: [
+      .selection([finderURL]), .selection([replacementURL]),
+    ])
+    let originalHistory = event(
+      source: "History Hold", destination: "Archive", timestamp: Date(timeIntervalSince1970: 2)
+    )
+    let replacementHistory = event(
+      source: "Replacement", destination: "Elsewhere", timestamp: Date(timeIntervalSince1970: 3)
+    )
+    let originalDestination = RecentDestination(
+      id: "/Archive", name: "Archive", url: URL(fileURLWithPath: "/Archive"),
+      bookmark: nil, lastUsedAt: Date(timeIntervalSince1970: 2)
+    )
+    let replacementDestination = RecentDestination(
+      id: "/Elsewhere", name: "Elsewhere", url: URL(fileURLWithPath: "/Elsewhere"),
+      bookmark: nil, lastUsedAt: Date(timeIntervalSince1970: 3)
+    )
+    var historySnapshot = [originalHistory]
+    var destinationSnapshot = [originalDestination]
+    var historyReads = 0
+    var destinationReads = 0
+    let model = QuickSendModel(
+      finderReader: reader, items: { [] },
+      history: { historyReads += 1; return historySnapshot },
+      destinations: { destinationReads += 1; return destinationSnapshot },
+      isUndoEligible: { _ in false }, performPrimary: { _ in }, dismiss: {}
+    )
+
+    await model.refresh(finderContext: .finderWasFrontmost)
+    let finderResult = try! #require(model.resultsInGroup(.finderSelection).single)
+    let finderSemanticID = finderResult.semanticID
+    #expect(finderResult.finderURLs == [finderURL])
+    let initialHistoryReads = historyReads
+    let initialDestinationReads = destinationReads
+    historySnapshot = [replacementHistory]
+    destinationSnapshot = [replacementDestination]
+
+    model.setQuery("Hold")
+    #expect(Set(model.results.map(\.group)) == [.finderSelection, .history])
+    model.setQuery("missing")
+    #expect(model.results.isEmpty)
+    model.setQuery("")
+
+    #expect(await reader.callCount == 1)
+    #expect(historyReads == initialHistoryReads)
+    #expect(destinationReads == initialDestinationReads)
+    #expect(model.finderState == .selection([finderURL]))
+    #expect(model.resultsInGroup(.finderSelection).single?.semanticID == finderSemanticID)
+    #expect(model.resultsInGroup(.finderSelection).single?.finderURLs == [finderURL])
+    #expect(model.resultsInGroup(.history).single?.historyEventID == originalHistory.id)
+    #expect(model.resultsInGroup(.destination).single?.destinationID == originalDestination.id)
+  }
+
   @Test func arrowsWrapAndReturnDispatchesPrimary() async {
     var dispatched: [String] = []
     let model = makeModel(items: [item("A", kind: .file), item("B", kind: .file)], primary: {
@@ -288,7 +343,7 @@ struct QuickSendModelTests {
       exportItem: { itemID, destination in exports.append((itemID, destination.id)); return .dismiss },
       dismiss: {}
     )
-    model.query = "quarterly"
+    model.setQuery("quarterly")
     await model.refresh()
 
     #expect(model.results.map(\.title) == ["Quarterly Report"])
@@ -467,7 +522,7 @@ struct QuickSendModelTests {
       },
       dismiss: { dismissals += 1 }
     )
-    model.query = "source"
+    model.setQuery("source")
     await model.refresh()
     let selection = model.selectedResultID
 
@@ -532,6 +587,18 @@ private actor SequencedFinderReader: FinderSelectionReading {
   private var states: [FinderSelectionState]
   init(states: [FinderSelectionState]) { self.states = states }
   func readSelection(context: FinderSelectionContext) -> FinderSelectionState { states.removeFirst() }
+}
+
+private actor RecordingFinderReader: FinderSelectionReading {
+  private var states: [FinderSelectionState]
+  private(set) var callCount = 0
+
+  init(states: [FinderSelectionState]) { self.states = states }
+
+  func readSelection(context: FinderSelectionContext) -> FinderSelectionState {
+    callCount += 1
+    return states.removeFirst()
+  }
 }
 
 private actor ControlledFinderReader: FinderSelectionReading {

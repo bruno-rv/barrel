@@ -37,7 +37,7 @@ final class QuickSendModel: ObservableObject {
     case dismissPanel
   }
 
-  @Published var query = ""
+  @Published private(set) var query = ""
   @Published private(set) var results: [QuickSendResult] = []
   @Published var selectedResultID: QuickSendResult.ID?
   @Published private(set) var finderState: FinderSelectionState = .unavailable
@@ -59,8 +59,10 @@ final class QuickSendModel: ObservableObject {
   private var openHistoryAction: ((HistoryEvent) -> Bool)?
   private var revealHistoryAction: ((HistoryEvent) -> Bool)?
   private var refreshGeneration = 0
+  private var capturedFinderContext: FinderSelectionContext = .otherAppWasFrontmost
   private var currentDestinations: [RecentDestination] = []
   private var currentDestinationResults: [QuickSendResult] = []
+  private var capturedResults: [QuickSendResult] = []
 
   init(
     finderReader: FinderSelectionReading,
@@ -172,19 +174,31 @@ final class QuickSendModel: ObservableObject {
   func refresh(finderContext: FinderSelectionContext = .otherAppWasFrontmost) async {
     refreshGeneration &+= 1
     let generation = refreshGeneration
-    let previousSelection = selectedResultID
     let refreshedFinderState = await finderReader.readSelection(context: finderContext)
     guard generation == refreshGeneration else { return }
+    capturedFinderContext = finderContext
     finderState = refreshedFinderState
+    let currentItems = items()
+    let currentHistory = history()
     currentDestinations = destinations()
     currentDestinationResults = destinationResults(from: currentDestinations)
-
-    let candidates = finderResults()
-      + undoResults()
-      + temporaryResults()
-      + historyResults()
+    capturedResults = finderResults()
+      + undoResults(from: currentHistory)
+      + temporaryResults(from: currentItems)
+      + historyResults(from: currentHistory)
       + currentDestinationResults
-    results = candidates.enumerated()
+    recomputeResults()
+  }
+
+  func setQuery(_ query: String) {
+    guard self.query != query else { return }
+    self.query = query
+    recomputeResults()
+  }
+
+  func recomputeResults() {
+    let previousSelection = selectedResultID
+    results = capturedResults.enumerated()
       .compactMap { index, result in matchRank(for: result).map { (result, $0, index) } }
       .sorted { lhs, rhs in
         if lhs.0.group.rawValue != rhs.0.group.rawValue {
@@ -349,8 +363,8 @@ final class QuickSendModel: ObservableObject {
     }
   }
 
-  private func undoResults() -> [QuickSendResult] {
-    guard let event = history()
+  private func undoResults(from history: [HistoryEvent]) -> [QuickSendResult] {
+    guard let event = history
       .filter(isUndoEligible)
       .max(by: { $0.timestamp < $1.timestamp })
     else { return [] }
@@ -362,8 +376,8 @@ final class QuickSendModel: ObservableObject {
     )]
   }
 
-  private func temporaryResults() -> [QuickSendResult] {
-    items()
+  private func temporaryResults(from items: [ShelfItem]) -> [QuickSendResult] {
+    items
       .filter { $0.trashedAt == nil && $0.deletedAt == nil }
       .map { item in
         QuickSendResult(
@@ -378,8 +392,8 @@ final class QuickSendModel: ObservableObject {
       }
   }
 
-  private func historyResults() -> [QuickSendResult] {
-    history().map { event in
+  private func historyResults(from history: [HistoryEvent]) -> [QuickSendResult] {
+    history.map { event in
       QuickSendResult(
         semanticID: "history:\(event.id)", group: .history,
         title: event.kind == .undo ? "Undid \(event.sourceName)" : event.sourceName,
@@ -460,7 +474,7 @@ final class QuickSendModel: ObservableObject {
   ) async {
     do {
       let outcome = try await action()
-      await refresh()
+      await refresh(finderContext: capturedFinderContext)
       switch outcome {
       case .dismiss:
         finishOperation(.success(()))

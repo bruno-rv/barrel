@@ -55,13 +55,12 @@ struct QuickSendView: View {
   var body: some View {
     VStack(spacing: 10) {
       QuickSendSearchField(
-        text: $model.query,
+        text: Binding(get: { model.query }, set: { model.setQuery($0) }),
         register: registerSearchField,
         command: handleCommand
       )
       .frame(height: 28)
       .accessibilityLabel("Quick Send search")
-      .onChange(of: model.query) { Task { await model.refresh() } }
 
       if model.finderPermissionDenied {
         HStack {
