@@ -142,6 +142,35 @@ final class FilePromiseDragSourceTests: XCTestCase {
     await waitUntil { weakDelegate == nil }
   }
 
+  func testAcceptedSessionReleasesDelegateWhenWriteCompletedBeforeSessionEnds() async {
+    let exporter = FakeExporter()
+    let lifecycle = FilePromiseDragLifecycle()
+    var delegate: ShelfFilePromiseDelegate? = ShelfFilePromiseDelegate(
+      itemID: UUID(),
+      fileName: "asset.bin",
+      exporter: exporter,
+      lifecycle: lifecycle
+    )
+    weak let weakDelegate = delegate
+    let provider = NSFilePromiseProvider(fileType: "public.data", delegate: delegate!)
+    var didComplete = false
+
+    lifecycle.begin(delegate: delegate!)
+    delegate!.filePromiseProvider(
+      provider,
+      writePromiseTo: URL(fileURLWithPath: "/tmp/promise-target")
+    ) { _ in
+      didComplete = true
+    }
+    delegate = nil
+    await waitUntil { didComplete }
+
+    XCTAssertNotNil(weakDelegate)
+    lifecycle.draggingSessionEnded(operation: .copy)
+
+    XCTAssertNil(weakDelegate)
+  }
+
   private func waitUntil(
     _ condition: @escaping @MainActor () -> Bool
   ) async {

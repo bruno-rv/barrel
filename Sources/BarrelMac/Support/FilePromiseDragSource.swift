@@ -12,26 +12,30 @@ protocol ShelfFilePromiseExporting: AnyObject {
 final class FilePromiseDragLifecycle {
   private var delegate: ShelfFilePromiseDelegate?
   private var writeInProgress = false
+  private var writeCompleted = false
   private var sessionEnded = false
 
   func begin(delegate: ShelfFilePromiseDelegate) {
     self.delegate = delegate
     writeInProgress = false
+    writeCompleted = false
     sessionEnded = false
   }
 
   func promiseWriteBegan() {
     writeInProgress = true
+    writeCompleted = false
   }
 
   func promiseWriteEnded() {
     writeInProgress = false
+    writeCompleted = true
     if sessionEnded { delegate = nil }
   }
 
   func draggingSessionEnded(operation: NSDragOperation) {
     sessionEnded = true
-    if operation.isEmpty && !writeInProgress { delegate = nil }
+    if !writeInProgress && (operation.isEmpty || writeCompleted) { delegate = nil }
   }
 }
 
