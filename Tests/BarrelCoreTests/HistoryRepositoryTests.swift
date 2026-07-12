@@ -62,6 +62,92 @@ final class HistoryRepositoryTests: XCTestCase {
     XCTAssertEqual(try Data(contentsOf: restoredURL), Data("report bytes".utf8))
   }
 
+  func testTombstonedLocalOverlayCanBeReexportedWithoutChangingCanonicalSync() async throws {
+    let fixture = try ExportFixture(fileName: "report.pdf", contents: "report bytes")
+    defer { fixture.remove() }
+    let firstExport = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
+    var tombstone = fixture.item
+    tombstone.title = "Deleted Item"
+    tombstone.fileName = nil
+    tombstone.relativePath = nil
+    tombstone.contentHash = nil
+    tombstone.deletedAt = firstExport.timestamp.addingTimeInterval(1)
+    tombstone.updatedAt = tombstone.deletedAt!
+    tombstone.revision += 1
+    try await fixture.repository.applySyncRecords([SyncRecord(item: tombstone)])
+    _ = try await fixture.repository.undo(historyEventID: firstExport.id)
+    let syncBeforeReexport = try await fixture.repository.syncRecords()
+
+    let reexport = try await fixture.repository.export(
+      itemID: fixture.item.id,
+      to: fixture.destination,
+      fileName: "Overlay Re-export.pdf"
+    )
+
+    let exportedURL = fixture.destination.appendingPathComponent("Overlay Re-export.pdf")
+    XCTAssertEqual(reexport.destinationURL, exportedURL)
+    XCTAssertEqual(reexport.fileName, "Overlay Re-export.pdf")
+    XCTAssertEqual(reexport.contentHash, fixture.item.contentHash)
+    XCTAssertEqual(try Data(contentsOf: exportedURL), Data("report bytes".utf8))
+    let temporary = try await fixture.repository.temporarySnapshot()
+    let syncAfterReexport = try await fixture.repository.syncRecords()
+    let history = try await fixture.repository.historySnapshot()
+    XCTAssertEqual(temporary, [])
+    XCTAssertEqual(syncAfterReexport, syncBeforeReexport)
+    XCTAssertEqual(syncAfterReexport.map(\.item), [tombstone])
+    XCTAssertEqual(history.first?.id, reexport.id)
+
+    _ = try await fixture.repository.undo(historyEventID: reexport.id)
+
+    XCTAssertFalse(FileManager.default.fileExists(atPath: exportedURL.path))
+    let restored = try await fixture.repository.temporarySnapshot()
+    let syncAfterSecondUndo = try await fixture.repository.syncRecords()
+    XCTAssertEqual(restored.map(\.id), [fixture.item.id])
+    XCTAssertEqual(syncAfterSecondUndo, syncBeforeReexport)
+    let restoredFileURL = await fixture.repository.fileURL(for: restored[0])
+    XCTAssertEqual(
+      try Data(contentsOf: try XCTUnwrap(restoredFileURL)),
+      Data("report bytes".utf8)
+    )
+  }
+
+  func testTombstonedLocalOverlayReexportPreservesExactNameCollision() async throws {
+    let fixture = try ExportFixture(fileName: "report.pdf", contents: "report bytes")
+    defer { fixture.remove() }
+    let firstExport = try await fixture.repository.export(itemID: fixture.item.id, to: fixture.destination)
+    var tombstone = fixture.item
+    tombstone.fileName = nil
+    tombstone.relativePath = nil
+    tombstone.contentHash = nil
+    tombstone.deletedAt = firstExport.timestamp.addingTimeInterval(1)
+    tombstone.updatedAt = tombstone.deletedAt!
+    tombstone.revision += 1
+    try await fixture.repository.applySyncRecords([SyncRecord(item: tombstone)])
+    _ = try await fixture.repository.undo(historyEventID: firstExport.id)
+    let occupiedURL = fixture.destination.appendingPathComponent("Occupied.pdf")
+    try Data("occupied".utf8).write(to: occupiedURL)
+
+    do {
+      _ = try await fixture.repository.export(
+        itemID: fixture.item.id,
+        to: fixture.destination,
+        fileName: "Occupied.pdf"
+      )
+      XCTFail("Expected collision failure")
+    } catch RepositoryError.exportDestinationExists(let url) {
+      XCTAssertEqual(url, occupiedURL)
+    }
+
+    XCTAssertEqual(try Data(contentsOf: occupiedURL), Data("occupied".utf8))
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: fixture.destination.appendingPathComponent("Occupied 2.pdf").path
+    ))
+    let temporary = try await fixture.repository.temporarySnapshot()
+    let sync = try await fixture.repository.syncRecords()
+    XCTAssertEqual(temporary.map(\.id), [fixture.item.id])
+    XCTAssertEqual(sync.map(\.item), [tombstone])
+  }
+
   func testCleanupCountsExportedBytesButDoesNotTrashRetainedExport() async throws {
     let clock = TestHistoryClock(Date(timeIntervalSince1970: 1_800_000_000))
     let fixture = try ExportFixture(

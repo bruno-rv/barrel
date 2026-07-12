@@ -54,6 +54,7 @@ struct DetailView: View {
           .onSubmit {
             store.rename(item, title: renameText)
           }
+          .disabled(store.isReadOnlyOverlay(item))
 
         Text(item.detail)
           .foregroundStyle(.secondary)
@@ -119,56 +120,62 @@ struct DetailView: View {
           Label("Delete Permanently", systemImage: "trash.slash")
         }
       } else {
-      Button {
-        store.rename(item, title: renameText)
-      } label: {
-        Label("Rename", systemImage: "pencil")
-      }
-
-      Button {
-        store.open(item)
-      } label: {
-        Label(item.kind == .link ? "Open Link" : "Open", systemImage: "arrow.up.right.square")
-      }
-
-      if store.fileURL(for: item) != nil {
-        Button {
-          store.reveal(item)
-        } label: {
-          Label("Reveal", systemImage: "finder")
+        if !store.isReadOnlyOverlay(item) {
+          Button {
+            store.rename(item, title: renameText)
+          } label: {
+            Label("Rename", systemImage: "pencil")
+          }
         }
-      }
 
-      if item.isStack {
         Button {
-          store.splitStack(item)
+          store.open(item)
         } label: {
-          Label("Split", systemImage: "square.stack.3d.up.slash")
+          Label(item.kind == .link ? "Open Link" : "Open", systemImage: "arrow.up.right.square")
         }
-      }
 
-      Button {
-        store.setPinned(item, isPinned: !item.isPinned)
-      } label: {
-        Label(item.isPinned ? "Unpin" : "Pin", systemImage: item.isPinned ? "pin.slash" : "pin")
-      }
+        if store.fileURL(for: item) != nil {
+          Button {
+            store.reveal(item)
+          } label: {
+            Label("Reveal", systemImage: "finder")
+          }
+        }
 
-      Menu {
-        Button("One Hour") { store.setExpiration(item, preset: .oneHour) }
-        Button("One Day") { store.setExpiration(item, preset: .oneDay) }
-        Button("One Week") { store.setExpiration(item, preset: .oneWeek) }
-        Button("Never") { store.setExpiration(item, preset: .never) }
-      } label: {
-        Label("Expiration", systemImage: "clock")
-      }
+        if item.isStack && !store.isReadOnlyOverlay(item) {
+          Button {
+            store.splitStack(item)
+          } label: {
+            Label("Split", systemImage: "square.stack.3d.up.slash")
+          }
+        }
 
-      Spacer()
+        if !store.isReadOnlyOverlay(item) {
+          Button {
+            store.setPinned(item, isPinned: !item.isPinned)
+          } label: {
+            Label(item.isPinned ? "Unpin" : "Pin", systemImage: item.isPinned ? "pin.slash" : "pin")
+          }
 
-      Button(role: .destructive) {
-        store.trash(item)
-      } label: {
-        Label("Move to Trash", systemImage: "trash")
-      }
+          Menu {
+            Button("One Hour") { store.setExpiration(item, preset: .oneHour) }
+            Button("One Day") { store.setExpiration(item, preset: .oneDay) }
+            Button("One Week") { store.setExpiration(item, preset: .oneWeek) }
+            Button("Never") { store.setExpiration(item, preset: .never) }
+          } label: {
+            Label("Expiration", systemImage: "clock")
+          }
+        }
+
+        Spacer()
+
+        if !store.isReadOnlyOverlay(item) {
+          Button(role: .destructive) {
+            store.trash(item)
+          } label: {
+            Label("Move to Trash", systemImage: "trash")
+          }
+        }
       }
     }
   }

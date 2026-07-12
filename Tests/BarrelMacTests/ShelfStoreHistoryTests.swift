@@ -128,6 +128,36 @@ final class ShelfStoreHistoryTests: XCTestCase {
     XCTAssertEqual(sync.map(\.item), [tombstone])
   }
 
+  func testRemoteTombstoneUndoOverlayCanBeReexportedThroughStore() async throws {
+    let fixture = try await Fixture()
+    let export = try await fixture.export(fileName: "Overlay.txt")
+    let tombstone = try await fixture.applyRemoteTombstone(after: export)
+    let store = ShelfStore(repository: fixture.repository, indexesSpotlight: false, loadOnInit: false)
+    await store.performUndo(export)
+    let displayed = try XCTUnwrap(store.items.first)
+    let syncBeforeReexport = try await fixture.repository.syncRecords()
+
+    let reexport = try await store.export(
+      itemID: displayed.id,
+      to: fixture.destination,
+      fileName: "Overlay Again.txt"
+    )
+
+    XCTAssertEqual(reexport.fileName, "Overlay Again.txt")
+    XCTAssertEqual(try Data(contentsOf: try XCTUnwrap(reexport.destinationURL)), Data("contents".utf8))
+    XCTAssertTrue(store.visibleItems.isEmpty)
+    let syncAfterReexport = try await fixture.repository.syncRecords()
+    XCTAssertEqual(syncAfterReexport, syncBeforeReexport)
+    XCTAssertEqual(syncAfterReexport.map(\.item), [tombstone])
+
+    await store.performUndo(reexport)
+
+    XCTAssertEqual(store.visibleItems.map(\.id), [displayed.id])
+    XCTAssertTrue(FileManager.default.fileExists(atPath: try XCTUnwrap(store.fileURL(for: store.visibleItems[0])).path))
+    let syncAfterSecondUndo = try await fixture.repository.syncRecords()
+    XCTAssertEqual(syncAfterSecondUndo, syncBeforeReexport)
+  }
+
   func testCleanupFailedUndoRefreshesCommittedStateAndShowsWarning() async throws {
     let manager = UndoCleanupFailureFileManager()
     let fixture = try await Fixture(fileManager: manager)
@@ -209,7 +239,7 @@ private final class Fixture: @unchecked Sendable {
   let repository: ShelfRepository
   private let root: URL
   private let source: URL
-  private let destination: URL
+  let destination: URL
   private let clock = Clock()
   private(set) var undoEventID: UUID?
 

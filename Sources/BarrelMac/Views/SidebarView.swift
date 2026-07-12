@@ -30,23 +30,27 @@ struct SidebarView: View {
                   store.deletePermanently(item)
                 }
               } else {
-                Button("Mark for Stack") { store.toggleSelection(for: item) }
-                if item.isStack {
-                  Button("Split Stack") { store.splitStack(item) }
-                }
-                Button(item.isPinned ? "Unpin" : "Pin") {
-                  store.setPinned(item, isPinned: !item.isPinned)
-                }
-                Menu("Expiration") {
-                  Button("One Hour") { store.setExpiration(item, preset: .oneHour) }
-                  Button("One Day") { store.setExpiration(item, preset: .oneDay) }
-                  Button("One Week") { store.setExpiration(item, preset: .oneWeek) }
-                  Button("Never") { store.setExpiration(item, preset: .never) }
+                if !store.isReadOnlyOverlay(item) {
+                  Button("Mark for Stack") { store.toggleSelection(for: item) }
+                  if item.isStack {
+                    Button("Split Stack") { store.splitStack(item) }
+                  }
+                  Button(item.isPinned ? "Unpin" : "Pin") {
+                    store.setPinned(item, isPinned: !item.isPinned)
+                  }
+                  Menu("Expiration") {
+                    Button("One Hour") { store.setExpiration(item, preset: .oneHour) }
+                    Button("One Day") { store.setExpiration(item, preset: .oneDay) }
+                    Button("One Week") { store.setExpiration(item, preset: .oneWeek) }
+                    Button("Never") { store.setExpiration(item, preset: .never) }
+                  }
                 }
                 Button("Reveal in Finder") { store.reveal(item) }
                 Button("Open") { store.open(item) }
-                Divider()
-                Button("Move to Trash", role: .destructive) { store.trash(item) }
+                if !store.isReadOnlyOverlay(item) {
+                  Divider()
+                  Button("Move to Trash", role: .destructive) { store.trash(item) }
+                }
               }
             }
           }

@@ -366,9 +366,6 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
   }
 
   func export(itemID: UUID, to directoryURL: URL, fileName: String) async throws -> HistoryEvent {
-    guard !localOverlayItemIDs.contains(itemID) else {
-      throw RepositoryError.itemNotFound(itemID)
-    }
     do {
       let event = try await repository.export(itemID: itemID, to: directoryURL, fileName: fileName)
       notifyRepositoryChange()
@@ -532,6 +529,10 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
 
   func isCanonicalMutationEligible(_ item: ShelfItem) -> Bool {
     !localOverlayItemIDs.contains(item.id)
+  }
+
+  func isReadOnlyOverlay(_ item: ShelfItem) -> Bool {
+    localOverlayItemIDs.contains(item.id)
   }
 
   private func report(cleanup outcome: CleanupOutcome) {

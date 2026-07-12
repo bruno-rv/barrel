@@ -121,7 +121,7 @@ public actor ShelfRepository {
   @discardableResult
   public func export(itemID: UUID, to directoryURL: URL) throws -> HistoryEvent {
     try ensureLoaded()
-    guard let item = items.first(where: { $0.id == itemID }),
+    guard let item = exportableItem(id: itemID),
           let relativePath = item.relativePath,
           let sourceURL = managedURL(for: relativePath) else {
       throw RepositoryError.itemNotFound(itemID)
@@ -136,12 +136,7 @@ public actor ShelfRepository {
   @discardableResult
   public func export(itemID: UUID, to directoryURL: URL, fileName: String) throws -> HistoryEvent {
     try ensureLoaded()
-    guard let item = items.first(where: {
-      $0.id == itemID
-        && $0.trashedAt == nil
-        && $0.deletedAt == nil
-        && !exportedItemIDs.contains($0.id)
-    }),
+    guard let item = exportableItem(id: itemID),
     let relativePath = item.relativePath,
     let sourceURL = managedURL(for: relativePath),
     let contentHash = item.contentHash else {
@@ -219,6 +214,23 @@ public actor ShelfRepository {
     }
     try deleteUnreferencedFiles(from: removed, remainingItems: items)
     return event
+  }
+
+  private func exportableItem(id: UUID) -> ShelfItem? {
+    guard !exportedItemIDs.contains(id),
+          let canonical = items.first(where: { $0.id == id }) else {
+      return nil
+    }
+    if canonical.trashedAt == nil, canonical.deletedAt == nil {
+      return canonical
+    }
+    guard canonical.deletedAt != nil,
+          let snapshot = localItemSnapshots[id],
+          snapshot.trashedAt == nil,
+          snapshot.deletedAt == nil else {
+      return nil
+    }
+    return snapshot
   }
 
   @discardableResult

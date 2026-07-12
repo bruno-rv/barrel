@@ -200,6 +200,7 @@ struct ContentView: View {
         ForEach(store.visibleItems) { item in
           ShelfTile(
             item: item,
+            isReadOnlyOverlay: store.isReadOnlyOverlay(item),
             isSelected: store.selectedItemID == item.id,
             isMarked: store.selectedIDs.contains(item.id),
             fileURL: store.fileURL(for: item),
@@ -303,6 +304,7 @@ struct ContentView: View {
 
 private struct ShelfTile: View {
   let item: ShelfItem
+  let isReadOnlyOverlay: Bool
   let isSelected: Bool
   let isMarked: Bool
   let fileURL: URL?
@@ -362,7 +364,7 @@ private struct ShelfTile: View {
 
       Spacer(minLength: 8)
 
-      if item.trashedAt == nil {
+      if item.trashedAt == nil && !isReadOnlyOverlay {
         Button(action: toggleMark) {
           Image(systemName: isMarked ? "checkmark.circle.fill" : "circle")
             .foregroundStyle(isMarked ? .white : .white.opacity(0.42))
@@ -385,23 +387,27 @@ private struct ShelfTile: View {
         Button("Restore", action: restore)
         Button("Delete Permanently", role: .destructive, action: deletePermanently)
       } else {
-        Button(isMarked ? "Unmark" : "Mark for Stack", action: toggleMark)
+        if !isReadOnlyOverlay {
+          Button(isMarked ? "Unmark" : "Mark for Stack", action: toggleMark)
+        }
         Button("Open", action: open)
         if fileURL != nil {
           Button("Reveal in Finder", action: reveal)
         }
-        if item.isStack {
-          Button("Split Stack", action: split)
+        if !isReadOnlyOverlay {
+          if item.isStack {
+            Button("Split Stack", action: split)
+          }
+          Button(item.isPinned ? "Unpin" : "Pin", action: pin)
+          Menu("Expiration") {
+            Button("One Hour") { expire(.oneHour) }
+            Button("One Day") { expire(.oneDay) }
+            Button("One Week") { expire(.oneWeek) }
+            Button("Never") { expire(.never) }
+          }
+          Divider()
+          Button("Move to Trash", role: .destructive, action: trash)
         }
-        Button(item.isPinned ? "Unpin" : "Pin", action: pin)
-        Menu("Expiration") {
-          Button("One Hour") { expire(.oneHour) }
-          Button("One Day") { expire(.oneDay) }
-          Button("One Week") { expire(.oneWeek) }
-          Button("Never") { expire(.never) }
-        }
-        Divider()
-        Button("Move to Trash", role: .destructive, action: trash)
       }
     }
   }
