@@ -14,12 +14,16 @@ protocol RecentDestinationResolving: Sendable {
 }
 
 struct RecentDestinationResolver: RecentDestinationResolving, Sendable {
+  private let now: @Sendable () -> Date
+  private let retention: TimeInterval
   private let resolveBookmark: @Sendable (Data) -> URL?
   private let fileExists: @Sendable (URL) -> Bool
   private let startAccessing: @Sendable (URL) -> Bool
   private let stopAccessing: @Sendable (URL) -> Void
 
   init(
+    now: @escaping @Sendable () -> Date = { Date() },
+    retention: TimeInterval = 86_400,
     resolveBookmark: @escaping @Sendable (Data) -> URL? = { Self.resolveDirectoryBookmark($0) },
     fileExists: @escaping @Sendable (URL) -> Bool = { Self.directoryExists($0) },
     startAccessing: @escaping @Sendable (URL) -> Bool = {
@@ -29,6 +33,8 @@ struct RecentDestinationResolver: RecentDestinationResolving, Sendable {
       $0.stopAccessingSecurityScopedResource()
     }
   ) {
+    self.now = now
+    self.retention = retention
     self.resolveBookmark = resolveBookmark
     self.fileExists = fileExists
     self.startAccessing = startAccessing
@@ -37,9 +43,14 @@ struct RecentDestinationResolver: RecentDestinationResolving, Sendable {
 
   func destinations(from events: [HistoryEvent]) -> [RecentDestination] {
     var seenPaths = Set<String>()
+    let currentDate = now()
 
     return events
-      .filter { $0.kind == .export && $0.reversedByEventID == nil }
+      .filter {
+        $0.kind == .export
+          && $0.reversedByEventID == nil
+          && currentDate.timeIntervalSince($0.timestamp) < retention
+      }
       .sorted {
         $0.timestamp == $1.timestamp
           ? $0.id.uuidString > $1.id.uuidString
@@ -47,18 +58,22 @@ struct RecentDestinationResolver: RecentDestinationResolving, Sendable {
       }
       .compactMap { event in
         let bookmarkURL = event.destinationDirectoryBookmark.flatMap(resolveBookmark)
-        guard let url = bookmarkURL ?? event.destinationURL?.deletingLastPathComponent() else {
+        let legacyURL = event.destinationURL?.deletingLastPathComponent()
+        guard let standardizedURL = [bookmarkURL, legacyURL]
+          .compactMap({ $0?.standardizedFileURL })
+          .first(where: fileExists)
+        else {
           return nil
         }
-        let standardizedURL = url.standardizedFileURL
-        guard fileExists(standardizedURL), seenPaths.insert(standardizedURL.path).inserted else {
+        guard seenPaths.insert(standardizedURL.path).inserted else {
           return nil
         }
+        let usedBookmark = bookmarkURL?.standardizedFileURL == standardizedURL
         return RecentDestination(
           id: standardizedURL.path,
           name: standardizedURL.lastPathComponent,
           url: standardizedURL,
-          bookmark: bookmarkURL == nil ? nil : event.destinationDirectoryBookmark,
+          bookmark: usedBookmark ? event.destinationDirectoryBookmark : nil,
           lastUsedAt: event.timestamp
         )
       }

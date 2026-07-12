@@ -18,6 +18,7 @@ final class RecentDestinationResolverTests: XCTestCase {
       timestamp: Date(timeIntervalSince1970: 1)
     )
     let resolver = RecentDestinationResolver(
+      now: { Date(timeIntervalSince1970: 10) },
       resolveBookmark: { $0 == bookmark ? desktop : nil },
       fileExists: { [desktop, documents].contains($0.standardizedFileURL) }
     )
@@ -41,6 +42,7 @@ final class RecentDestinationResolverTests: XCTestCase {
       timestamp: Date(timeIntervalSince1970: 1)
     )
     let resolver = RecentDestinationResolver(
+      now: { Date(timeIntervalSince1970: 10) },
       resolveBookmark: { _ in nil },
       fileExists: { $0.standardizedFileURL == directory }
     )
@@ -64,12 +66,66 @@ final class RecentDestinationResolverTests: XCTestCase {
     let missing = event(destinationURL: missingDirectory.appendingPathComponent("missing.txt"))
     let noURL = event(destinationURL: nil)
     let resolver = RecentDestinationResolver(
+      now: { Date(timeIntervalSince1970: 10) },
       resolveBookmark: { _ in nil },
       fileExists: { $0.standardizedFileURL == validDirectory }
     )
 
     XCTAssertTrue(resolver.destinations(from: [reversed, undo, missing, noURL]).isEmpty)
     XCTAssertTrue(resolver.destinations(from: []).isEmpty)
+  }
+
+  func testExcludesEventsAtOrBeyondRetentionBoundaryAndRetainsFutureEvents() {
+    let now = Date(timeIntervalSince1970: 200_000)
+    let directory = URL(fileURLWithPath: "/valid", isDirectory: true)
+    let withinRetention = event(
+      destinationURL: directory.appendingPathComponent("within.txt"),
+      timestamp: now.addingTimeInterval(-86_399)
+    )
+    let atBoundary = event(
+      destinationURL: directory.appendingPathComponent("boundary.txt"),
+      timestamp: now.addingTimeInterval(-86_400)
+    )
+    let expired = event(
+      destinationURL: directory.appendingPathComponent("expired.txt"),
+      timestamp: now.addingTimeInterval(-86_401)
+    )
+    let futureDirectory = URL(fileURLWithPath: "/future", isDirectory: true)
+    let future = event(
+      destinationURL: futureDirectory.appendingPathComponent("future.txt"),
+      timestamp: now.addingTimeInterval(1)
+    )
+    let resolver = RecentDestinationResolver(
+      now: { now },
+      resolveBookmark: { _ in nil },
+      fileExists: { [directory, futureDirectory].contains($0.standardizedFileURL) }
+    )
+
+    let destinations = resolver.destinations(
+      from: [withinRetention, atBoundary, expired, future]
+    )
+
+    XCTAssertEqual(destinations.map(\.url), [futureDirectory, directory])
+  }
+
+  func testFallsBackToLegacyParentWhenResolvedBookmarkIsNotAValidDirectory() {
+    let bookmark = Data("missing-bookmark".utf8)
+    let missingBookmarkDirectory = URL(fileURLWithPath: "/missing", isDirectory: true)
+    let legacyDirectory = URL(fileURLWithPath: "/legacy", isDirectory: true)
+    let export = event(
+      destinationURL: legacyDirectory.appendingPathComponent("file.txt"),
+      bookmark: bookmark
+    )
+    let resolver = RecentDestinationResolver(
+      now: { Date(timeIntervalSince1970: 10) },
+      resolveBookmark: { $0 == bookmark ? missingBookmarkDirectory : nil },
+      fileExists: { $0.standardizedFileURL == legacyDirectory }
+    )
+
+    let destinations = resolver.destinations(from: [export])
+
+    XCTAssertEqual(destinations.map(\.url), [legacyDirectory])
+    XCTAssertNil(destinations.first?.bookmark)
   }
 
   func testSecurityScopeRemainsActiveUntilAwaitedOperationReturns() async throws {
