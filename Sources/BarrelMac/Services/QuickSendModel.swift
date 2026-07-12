@@ -18,7 +18,7 @@ enum QuickSendEscapeRouter {
 final class QuickSendModel: ObservableObject {
   enum AsyncActionOutcome {
     case dismiss
-    case keepOpen(warning: String)
+    case keepOpen(warning: String, consumeFinderSelection: Bool = false)
   }
 
   enum SelectionDirection {
@@ -114,7 +114,10 @@ final class QuickSendModel: ObservableObject {
       case .finderSelection:
         let outcome = await store.importURLsForQuickSend(result.finderURLs)
         if !outcome.failures.isEmpty {
-          throw QuickSendActionError(outcome.failures.map(\.message).joined(separator: "\n"))
+          return .keepOpen(
+            warning: outcome.failures.map(\.message).joined(separator: "\n"),
+            consumeFinderSelection: !outcome.successes.isEmpty
+          )
         }
         return .dismiss
       case .undoLatest:
@@ -167,6 +170,11 @@ final class QuickSendModel: ObservableObject {
     return false
   }
 
+  var activeActionCapabilities: Set<QuickSendAvailableAction> {
+    guard case let .actions(id) = secondaryMode else { return [] }
+    return results.first(where: { $0.id == id })?.availableActions ?? []
+  }
+
   func resultsInGroup(_ group: QuickSendResultGroup) -> [QuickSendResult] {
     results.filter { $0.group == group }
   }
@@ -178,6 +186,10 @@ final class QuickSendModel: ObservableObject {
     guard generation == refreshGeneration else { return }
     capturedFinderContext = finderContext
     finderState = refreshedFinderState
+    refreshStoreDerivedResults()
+  }
+
+  private func refreshStoreDerivedResults() {
     let currentItems = items()
     let currentHistory = history()
     currentDestinations = destinations()
@@ -285,12 +297,12 @@ final class QuickSendModel: ObservableObject {
 
   @discardableResult
   func openSelectedAction() -> Bool {
-    performCapturedAction(itemAction: openItemAction, historyAction: openHistoryAction)
+    performCapturedAction(.open, itemAction: openItemAction, historyAction: openHistoryAction)
   }
 
   @discardableResult
   func revealSelectedAction() -> Bool {
-    performCapturedAction(itemAction: revealItemAction, historyAction: revealHistoryAction)
+    performCapturedAction(.reveal, itemAction: revealItemAction, historyAction: revealHistoryAction)
   }
 
   @discardableResult
@@ -346,7 +358,7 @@ final class QuickSendModel: ObservableObject {
       return [QuickSendResult(
         semanticID: "finder:\(encodedPaths)",
         group: .finderSelection,
-        title: urls.count == 1 ? urls[0].lastPathComponent : "\(urls.count) Finder Items",
+        title: urls.count == 1 ? "Hold 1 Finder Item" : "Hold \(urls.count) Finder Items",
         subtitle: "Finder Selection",
         searchTerms: paths,
         finderURLs: urls,
@@ -380,14 +392,20 @@ final class QuickSendModel: ObservableObject {
     items
       .filter { $0.trashedAt == nil && $0.deletedAt == nil }
       .map { item in
-        QuickSendResult(
+        let availableActions: Set<QuickSendAvailableAction>
+        switch item.kind {
+        case .file, .image: availableActions = [.open, .reveal]
+        case .link: availableActions = [.open]
+        case .text, .stack: availableActions = []
+        }
+        return QuickSendResult(
           semanticID: "item:\(item.id)", group: .temporary, title: item.title,
           subtitle: item.detail,
           searchTerms: [item.detail, item.text ?? "", item.kind.rawValue, item.kind.label, item.origin.rawValue],
           shelfItemID: item.id,
           recency: item.updatedAt,
           isPrimaryEnabled: item.kind == .file || item.kind == .image,
-          isSecondaryEnabled: item.kind == .file || item.kind == .image
+          availableActions: availableActions
         )
       }
   }
@@ -442,11 +460,13 @@ final class QuickSendModel: ObservableObject {
   }
 
   private func performCapturedAction(
+    _ capability: QuickSendAvailableAction,
     itemAction: ((ShelfItem.ID) -> Bool)?, historyAction: ((HistoryEvent) -> Bool)?
   ) -> Bool {
     guard !isOperationRunning,
           case let .actions(capturedID) = secondaryMode,
-          let capturedResult = results.first(where: { $0.id == capturedID }) else { return false }
+          let capturedResult = results.first(where: { $0.id == capturedID }),
+          capturedResult.availableActions.contains(capability) else { return false }
     let succeeded: Bool
     switch capturedResult.group {
     case .temporary:
@@ -479,7 +499,11 @@ final class QuickSendModel: ObservableObject {
       case .dismiss:
         finishOperation(.success(()))
         dismissAction()
-      case .keepOpen(let warning):
+      case .keepOpen(let warning, let consumeFinderSelection):
+        if consumeFinderSelection {
+          finderState = .empty
+          refreshStoreDerivedResults()
+        }
         inlineError = warning
         isOperationRunning = false
       }

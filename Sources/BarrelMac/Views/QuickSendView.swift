@@ -123,8 +123,12 @@ struct QuickSendView: View {
       }
       if model.secondaryMode == .actions(result.id) {
         HStack {
-          Button("Open") { _ = model.openSelectedAction() }
-          Button("Reveal in Finder") { _ = model.revealSelectedAction() }
+          if model.activeActionCapabilities.contains(.open) {
+            Button("Open") { _ = model.openSelectedAction() }
+          }
+          if model.activeActionCapabilities.contains(.reveal) {
+            Button("Reveal in Finder") { _ = model.revealSelectedAction() }
+          }
         }.buttonStyle(.bordered)
       }
     }

@@ -5,7 +5,7 @@ import Testing
 
 @MainActor
 struct QuickSendActionTests {
-  @Test func fullFinderImportRefreshesAndDismissesWhilePartialImportStaysOpen() async throws {
+  @Test func partialFinderImportRefreshesSuccessfulContentAndConsumesCapturedSelection() async throws {
     let fixture = try await ActionFixture()
     let folder = fixture.root.appendingPathComponent("Folder", isDirectory: true)
     try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -26,6 +26,13 @@ struct QuickSendActionTests {
     #expect(dismissals == 0)
     #expect(model.query == fixture.source.lastPathComponent)
     #expect(model.inlineError != nil)
+    #expect(model.resultsInGroup(.finderSelection).isEmpty)
+    #expect(model.resultsInGroup(.temporary).map(\.title) == ["Source"])
+    #expect(model.selectedResult?.shelfItemID == store.items.first?.id)
+
+    model.performPrimary()
+    await waitUntil { !model.isOperationRunning }
+    #expect(store.liveItemCount == 1)
   }
 
   @Test func fullFinderImportDismissesAfterRefreshingResults() async throws {

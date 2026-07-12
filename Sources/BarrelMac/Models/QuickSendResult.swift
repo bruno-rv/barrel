@@ -1,5 +1,10 @@
 import Foundation
 
+enum QuickSendAvailableAction: Hashable, Sendable {
+  case open
+  case reveal
+}
+
 enum QuickSendResultGroup: Int, CaseIterable, Sendable {
   case finderSelection
   case undoLatest
@@ -23,7 +28,9 @@ struct QuickSendResult: Identifiable, Equatable, Sendable {
   let destinationID: RecentDestination.ID?
   let recency: Date
   let isPrimaryEnabled: Bool
-  let isSecondaryEnabled: Bool
+  let availableActions: Set<QuickSendAvailableAction>
+
+  var isSecondaryEnabled: Bool { !availableActions.isEmpty }
 
   init(
     semanticID: String,
@@ -37,6 +44,7 @@ struct QuickSendResult: Identifiable, Equatable, Sendable {
     destinationID: RecentDestination.ID? = nil,
     recency: Date = .distantPast,
     isPrimaryEnabled: Bool,
+    availableActions: Set<QuickSendAvailableAction> = [],
     isSecondaryEnabled: Bool = false
   ) {
     id = semanticID
@@ -51,6 +59,8 @@ struct QuickSendResult: Identifiable, Equatable, Sendable {
     self.destinationID = destinationID
     self.recency = recency
     self.isPrimaryEnabled = isPrimaryEnabled
-    self.isSecondaryEnabled = isSecondaryEnabled
+    self.availableActions = availableActions.isEmpty && isSecondaryEnabled
+      ? [.open, .reveal]
+      : availableActions
   }
 }

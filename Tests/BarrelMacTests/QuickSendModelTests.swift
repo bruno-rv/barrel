@@ -73,6 +73,59 @@ struct QuickSendModelTests {
     ])
   }
 
+  @Test func itemActionsAreExplicitAndIndependentOfSendEligibility() async {
+    let values = [
+      item("File", kind: .file), item("Image", kind: .image), item("Link", kind: .link),
+      item("Text", kind: .text), item("Stack", kind: .stack),
+    ]
+    let model = makeModel(items: values)
+    await model.refresh()
+
+    let actions = Dictionary(
+      uniqueKeysWithValues: model.resultsInGroup(.temporary).map { ($0.title, $0.availableActions) }
+    )
+    #expect(actions == [
+      "File": [.open, .reveal], "Image": [.open, .reveal], "Link": [.open],
+      "Text": [], "Stack": [],
+    ])
+  }
+
+  @Test func finderHoldLabelsUseExactSingularAndPluralCopy() async {
+    let reader = SequencedFinderReader(states: [
+      .selection([URL(fileURLWithPath: "/One")]),
+      .selection([URL(fileURLWithPath: "/One"), URL(fileURLWithPath: "/Two")]),
+    ])
+    let model = makeModel(reader: reader)
+
+    await model.refresh()
+    #expect(model.resultsInGroup(.finderSelection).single?.title == "Hold 1 Finder Item")
+    await model.refresh()
+    #expect(model.resultsInGroup(.finderSelection).single?.title == "Hold 2 Finder Items")
+  }
+
+  @Test func openOnlyActionLayerRoutesCapturedLinkIDAndDoesNotReveal() async {
+    let link = item("Link", kind: .link)
+    let file = item("File", kind: .file)
+    var opened: [UUID] = []
+    var revealed: [UUID] = []
+    let model = QuickSendModel(
+      finderReader: StaticFinderReader(state: .empty), items: { [link, file] }, history: { [] },
+      destinations: { [] }, isUndoEligible: { _ in false }, performPrimary: { _ in },
+      openItem: { opened.append($0); return true },
+      revealItem: { revealed.append($0); return true }, dismiss: {}
+    )
+    await model.refresh()
+    model.selectedResultID = "item:\(link.id)"
+    model.performSecondary()
+    model.selectedResultID = "item:\(file.id)"
+
+    #expect(model.secondaryMode == .actions("item:\(link.id)"))
+    #expect(model.openSelectedAction())
+    #expect(!model.revealSelectedAction())
+    #expect(opened == [link.id])
+    #expect(revealed.isEmpty)
+  }
+
   @Test func undoUsesOnlyAuthoritativelyEligibleEventAndReverseEventsAreInformational() async {
     let now = Date(timeIntervalSince1970: 10)
     let stale = event(source: "Stale", timestamp: now.addingTimeInterval(-5))
@@ -141,7 +194,7 @@ struct QuickSendModelTests {
     await olderRefresh.value
 
     #expect(model.finderState == .selection([URL(fileURLWithPath: "/Newer")]))
-    #expect(model.resultsInGroup(.finderSelection).single?.title == "Newer")
+    #expect(model.resultsInGroup(.finderSelection).single?.title == "Hold 1 Finder Item")
   }
 
   @Test func reorderedFinderSetKeepsSelectionIdentityAndProviderURLOrderForImport() async {
