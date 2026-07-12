@@ -114,7 +114,7 @@ final class QuickSendModel: ObservableObject {
   }
 
   func performSecondary() {
-    guard !isOperationRunning, let selectedResult, selectedResult.isPrimaryEnabled else { return }
+    guard !isOperationRunning, let selectedResult, selectedResult.isSecondaryEnabled else { return }
     secondaryMode = .actions(selectedResult.id)
   }
 
@@ -144,8 +144,9 @@ final class QuickSendModel: ObservableObject {
     case let .selection(urls):
       guard !urls.isEmpty else { return [] }
       let paths = urls.map { $0.standardizedFileURL.path }
+      let encodedPaths = paths.sorted().map { "\($0.utf8.count):\($0)" }.joined()
       return [QuickSendResult(
-        semanticID: "finder:\(paths.sorted().joined(separator: "|"))",
+        semanticID: "finder:\(encodedPaths)",
         group: .finderSelection,
         title: urls.count == 1 ? urls[0].lastPathComponent : "\(urls.count) Finder Items",
         subtitle: "Finder Selection",
@@ -186,7 +187,8 @@ final class QuickSendModel: ObservableObject {
           subtitle: item.detail,
           searchTerms: [item.detail, item.text ?? "", item.kind.rawValue, item.kind.label, item.origin.rawValue],
           recency: item.updatedAt,
-          isPrimaryEnabled: item.kind == .file || item.kind == .image
+          isPrimaryEnabled: item.kind == .file || item.kind == .image,
+          isSecondaryEnabled: item.kind == .file || item.kind == .image
         )
       }
   }
@@ -198,7 +200,10 @@ final class QuickSendModel: ObservableObject {
         title: event.kind == .undo ? "Undid \(event.sourceName)" : event.sourceName,
         subtitle: event.destinationName,
         searchTerms: [event.kind.rawValue, event.fileName, event.destinationName],
-        recency: event.timestamp, isPrimaryEnabled: false
+        recency: event.timestamp, isPrimaryEnabled: false,
+        isSecondaryEnabled: event.destinationURL.map {
+          FileManager.default.fileExists(atPath: $0.path)
+        } ?? false
       )
     }
   }

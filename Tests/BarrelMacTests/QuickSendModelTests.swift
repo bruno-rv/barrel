@@ -165,6 +165,21 @@ struct QuickSendModelTests {
     #expect(dispatchedURLs == [b, a])
   }
 
+  @Test func finderSemanticIDDoesNotCollideWhenPathsContainPipe() async {
+    let reader = SequencedFinderReader(states: [
+      .selection([URL(fileURLWithPath: "/A|/B"), URL(fileURLWithPath: "/C")]),
+      .selection([URL(fileURLWithPath: "/A"), URL(fileURLWithPath: "/B|/C")]),
+    ])
+    let model = makeModel(reader: reader)
+
+    await model.refresh()
+    let firstID = model.resultsInGroup(.finderSelection).single?.semanticID
+    await model.refresh()
+    let secondID = model.resultsInGroup(.finderSelection).single?.semanticID
+
+    #expect(firstID != secondID)
+  }
+
   @Test func arrowsWrapAndReturnDispatchesPrimary() async {
     var dispatched: [String] = []
     let model = makeModel(items: [item("A", kind: .file), item("B", kind: .file)], primary: {
@@ -193,6 +208,49 @@ struct QuickSendModelTests {
     #expect(dismissals == 0)
     #expect(model.handleEscape())
     #expect(dismissals == 1)
+  }
+
+  @Test func informationalHistoryUsesSecondaryCapabilityIndependentlyOfPrimary() async throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let existingURL = directory.appendingPathComponent("Existing")
+    try Data().write(to: existingURL)
+    let stale = event(source: "Stale", timestamp: Date(timeIntervalSince1970: 1), destinationURL: existingURL)
+    let reverse = event(
+      kind: .undo, source: "Reverse", timestamp: Date(timeIntervalSince1970: 2),
+      reversed: stale.id, destinationURL: existingURL
+    )
+    var dispatched: [QuickSendResult.ID] = []
+    let model = makeModel(history: [stale, reverse], primary: { dispatched.append($0.id) })
+    await model.refresh()
+
+    for event in [stale, reverse] {
+      model.selectedResultID = "history:\(event.id)"
+      #expect(model.selectedResult?.isPrimaryEnabled == false)
+      #expect(model.selectedResult?.isSecondaryEnabled == true)
+      model.performPrimary()
+      #expect(dispatched.isEmpty)
+      model.performSecondary()
+      #expect(model.secondaryMode == .actions("history:\(event.id)"))
+      _ = model.handleEscape()
+    }
+  }
+
+  @Test func missingHistoryDestinationDisablesSecondaryAction() async {
+    let missingURL = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString)
+    let history = event(
+      source: "Missing", timestamp: Date(timeIntervalSince1970: 1), destinationURL: missingURL
+    )
+    let model = makeModel(history: [history])
+    await model.refresh()
+    model.selectedResultID = "history:\(history.id)"
+
+    #expect(model.selectedResult?.isSecondaryEnabled == false)
+    model.performSecondary()
+    #expect(model.secondaryMode == nil)
   }
 
   @Test func permissionDenialDisablesOnlyFinderImportAndExposesPermissionState() async {
@@ -245,11 +303,12 @@ struct QuickSendModelTests {
   private func event(
     kind: HistoryEventKind = .export, source: String,
     destination: String = "Desktop", timestamp: Date,
-    reversed: UUID? = nil, reversedBy: UUID? = nil
+    reversed: UUID? = nil, reversedBy: UUID? = nil,
+    destinationURL: URL? = nil
   ) -> HistoryEvent {
     HistoryEvent(
       itemID: UUID(), kind: kind, sourceName: source, destinationName: destination,
-      destinationURL: URL(fileURLWithPath: "/\(destination)/\(source)"),
+      destinationURL: destinationURL ?? URL(fileURLWithPath: "/\(destination)/\(source)"),
       destinationBookmark: nil, fileName: source, contentHash: "hash", timestamp: timestamp,
       reversedEventID: reversed, reversedByEventID: reversedBy
     )

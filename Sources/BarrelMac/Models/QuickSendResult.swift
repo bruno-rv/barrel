@@ -20,6 +20,7 @@ struct QuickSendResult: Identifiable, Equatable, Sendable {
   let finderURLs: [URL]
   let recency: Date
   let isPrimaryEnabled: Bool
+  let isSecondaryEnabled: Bool
 
   init(
     semanticID: String,
@@ -29,7 +30,8 @@ struct QuickSendResult: Identifiable, Equatable, Sendable {
     searchTerms: [String] = [],
     finderURLs: [URL] = [],
     recency: Date = .distantPast,
-    isPrimaryEnabled: Bool
+    isPrimaryEnabled: Bool,
+    isSecondaryEnabled: Bool = false
   ) {
     id = semanticID
     self.semanticID = semanticID
@@ -40,5 +42,6 @@ struct QuickSendResult: Identifiable, Equatable, Sendable {
     self.finderURLs = finderURLs
     self.recency = recency
     self.isPrimaryEnabled = isPrimaryEnabled
+    self.isSecondaryEnabled = isSecondaryEnabled
   }
 }

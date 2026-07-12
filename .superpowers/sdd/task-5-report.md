@@ -135,3 +135,39 @@ Result: 13 tests passed, 0 failures.
 
 Follow-up commit: created with this report; see the repository history and
 worker handoff for its hash.
+
+## Secondary-capability and Finder-identity follow-up
+
+- Added `isSecondaryEnabled` independently from `isPrimaryEnabled`.
+  `performSecondary()` now gates Command-Return on secondary capability only;
+  Return continues to use primary capability unchanged.
+- Informational History rows, including stale exports and reverse events,
+  expose secondary Open/Reveal actions when their recorded destination exists.
+  A missing destination leaves secondary actions disabled.
+- Replaced delimiter-joined Finder paths with sorted, UTF-8-length-prefixed
+  standardized paths, preserving deterministic set identity without collisions
+  when a valid path contains `|`.
+
+### Follow-up TDD evidence
+
+RED command:
+
+```bash
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  swift test --filter QuickSendModelTests
+```
+
+Result: expected compile failure in the focused History tests because
+`QuickSendResult.isSecondaryEnabled` did not yet exist.
+
+GREEN command:
+
+```bash
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  swift test --filter QuickSendModelTests
+```
+
+Result: 16 tests passed, 0 failures. The new tests cover non-Undo and reverse
+History secondary actions with primary dispatch remaining disabled, missing
+destination suppression, and two distinct Finder path sets containing `|`
+that collided under the previous encoding.
