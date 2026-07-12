@@ -17,6 +17,7 @@ enum EdgeShelfEvent: Equatable {
   case edgeEntered
   case edgeExited
   case revealDelayElapsed
+  case minimumVisibilityElapsed
   case pointerEnteredPanel
   case pointerExitedPanel
   case hideDelayElapsed
@@ -30,6 +31,9 @@ enum EdgeShelfEffect: Equatable {
   case scheduleReveal
   case cancelReveal
   case show
+  case scheduleMinimumVisibility
+  case rememberPendingHide
+  case forgetPendingHide
   case scheduleHide
   case cancelHide
   case hide
@@ -37,9 +41,16 @@ enum EdgeShelfEffect: Equatable {
 
 struct EdgeShelfStateMachine {
   private(set) var phase: EdgeShelfPhase
+  private var isMinimumVisibilityElapsed: Bool
+  private var isPointerInsidePanel: Bool
+  private var isDragActive: Bool
+  private var hasPendingHide = false
 
   init(phase: EdgeShelfPhase = .hidden) {
     self.phase = phase
+    self.isMinimumVisibilityElapsed = phase == .hidePending
+    self.isPointerInsidePanel = phase == .shown
+    self.isDragActive = phase == .dragLocked
   }
 
   mutating func handle(_ event: EdgeShelfEvent) -> [EdgeShelfEffect] {
@@ -52,40 +63,74 @@ struct EdgeShelfStateMachine {
       return [.cancelReveal]
     case (.revealPending, .revealDelayElapsed):
       phase = .shown
-      return [.show]
+      isMinimumVisibilityElapsed = false
+      return [.show, .scheduleMinimumVisibility]
     case (.shown, .pointerExitedPanel):
-      phase = .hidePending
-      return [.scheduleHide]
-    case (.hidePending, .pointerEnteredPanel):
+      isPointerInsidePanel = false
+      if isMinimumVisibilityElapsed {
+        phase = .hidden
+        return [.hide]
+      }
+      hasPendingHide = true
+      return [.rememberPendingHide]
+    case (.shown, .pointerEnteredPanel), (.hidePending, .pointerEnteredPanel):
+      isPointerInsidePanel = true
+      hasPendingHide = false
       phase = .shown
-      return [.cancelHide]
+      return [.forgetPendingHide]
+    case (.shown, .minimumVisibilityElapsed), (.dragLocked, .minimumVisibilityElapsed):
+      isMinimumVisibilityElapsed = true
+      if hasPendingHide && !isPointerInsidePanel && !isDragActive {
+        hasPendingHide = false
+        phase = .hidden
+        return [.hide]
+      }
+      return []
     case (.hidePending, .hideDelayElapsed):
       phase = .hidden
       return [.hide]
     case (.shown, .dragBegan), (.hidePending, .dragBegan):
+      isDragActive = true
+      hasPendingHide = false
       phase = .dragLocked
-      return [.cancelHide]
+      return [.forgetPendingHide]
     case (.hidden, .dragBegan):
+      isDragActive = true
+      isMinimumVisibilityElapsed = false
       phase = .dragLocked
-      return [.show]
+      return [.show, .scheduleMinimumVisibility]
     case (.revealPending, .dragBegan):
+      isDragActive = true
+      isMinimumVisibilityElapsed = false
       phase = .dragLocked
-      return [.cancelReveal, .show]
+      return [.cancelReveal, .show, .scheduleMinimumVisibility]
     case (.dragLocked, .dragEnded(pointerInside: true)):
+      isDragActive = false
+      isPointerInsidePanel = true
       phase = .shown
       return []
     case (.dragLocked, .dragEnded(pointerInside: false)):
-      phase = .hidePending
-      return [.scheduleHide]
+      isDragActive = false
+      isPointerInsidePanel = false
+      if isMinimumVisibilityElapsed {
+        phase = .hidden
+        return [.hide]
+      }
+      hasPendingHide = true
+      phase = .shown
+      return [.rememberPendingHide]
     case (.revealPending, .explicitShow):
       phase = .shown
-      return [.cancelReveal, .show]
+      isMinimumVisibilityElapsed = false
+      return [.cancelReveal, .show, .scheduleMinimumVisibility]
     case (.hidePending, .explicitShow):
       phase = .shown
-      return [.cancelHide, .show]
+      isMinimumVisibilityElapsed = false
+      return [.cancelHide, .show, .scheduleMinimumVisibility]
     case (.hidden, .explicitShow), (.shown, .explicitShow):
       phase = .shown
-      return [.show]
+      isMinimumVisibilityElapsed = false
+      return [.show, .scheduleMinimumVisibility]
     case (.dragLocked, .explicitShow):
       return [.show]
     case (.revealPending, .autoHideChanged(isEnabled: false, pointerInside: _)):

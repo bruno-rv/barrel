@@ -13,7 +13,7 @@ final class EdgeShelfModelTests: XCTestCase {
 
     XCTAssertEqual(machine.handle(.edgeEntered), [.scheduleReveal])
     XCTAssertEqual(machine.phase, .revealPending)
-    XCTAssertEqual(machine.handle(.revealDelayElapsed), [.show])
+    XCTAssertEqual(machine.handle(.revealDelayElapsed), [.show, .scheduleMinimumVisibility])
     XCTAssertEqual(machine.phase, .shown)
   }
 
@@ -25,39 +25,74 @@ final class EdgeShelfModelTests: XCTestCase {
     XCTAssertEqual(machine.phase, .hidden)
   }
 
-  func testPointerExitSchedulesHideAndElapsedDelayHidesPanel() {
-    var machine = EdgeShelfStateMachine(phase: .shown)
+  func testExitDuringMinimumVisibilityDefersHide() {
+    var machine = EdgeShelfStateMachine()
+    _ = machine.handle(.edgeEntered)
 
-    XCTAssertEqual(machine.handle(.pointerExitedPanel), [.scheduleHide])
-    XCTAssertEqual(machine.phase, .hidePending)
-    XCTAssertEqual(machine.handle(.hideDelayElapsed), [.hide])
+    XCTAssertEqual(machine.handle(.revealDelayElapsed), [.show, .scheduleMinimumVisibility])
+    XCTAssertEqual(machine.phase, .shown)
+    XCTAssertEqual(machine.handle(.pointerExitedPanel), [.rememberPendingHide])
+    XCTAssertEqual(machine.phase, .shown)
+    XCTAssertEqual(machine.handle(.minimumVisibilityElapsed), [.hide])
+  }
+
+  func testReentryAndDragCancelDeferredHide() {
+    var machine = EdgeShelfStateMachine()
+    _ = machine.handle(.edgeEntered)
+    _ = machine.handle(.revealDelayElapsed)
+    _ = machine.handle(.pointerExitedPanel)
+
+    XCTAssertEqual(machine.handle(.pointerEnteredPanel), [.forgetPendingHide])
+    _ = machine.handle(.pointerExitedPanel)
+    XCTAssertEqual(machine.handle(.dragBegan), [.forgetPendingHide])
+    XCTAssertEqual(machine.handle(.minimumVisibilityElapsed), [])
+  }
+
+  func testDragEndOutsideAfterMinimumVisibilityHidesImmediately() {
+    var machine = EdgeShelfStateMachine()
+    _ = machine.handle(.edgeEntered)
+    _ = machine.handle(.revealDelayElapsed)
+    _ = machine.handle(.minimumVisibilityElapsed)
+    _ = machine.handle(.dragBegan)
+
+    XCTAssertEqual(machine.handle(.dragEnded(pointerInside: false)), [.hide])
+    XCTAssertEqual(machine.phase, .hidden)
+  }
+
+  func testPointerExitAfterMinimumVisibilityHidesPanel() {
+    var machine = EdgeShelfStateMachine()
+    _ = machine.handle(.edgeEntered)
+    _ = machine.handle(.revealDelayElapsed)
+    _ = machine.handle(.minimumVisibilityElapsed)
+
+    XCTAssertEqual(machine.handle(.pointerExitedPanel), [.hide])
     XCTAssertEqual(machine.phase, .hidden)
   }
 
   func testEnteringPanelBeforeHideCancelsPendingHide() {
     var machine = EdgeShelfStateMachine(phase: .hidePending)
 
-    XCTAssertEqual(machine.handle(.pointerEnteredPanel), [.cancelHide])
+    XCTAssertEqual(machine.handle(.pointerEnteredPanel), [.forgetPendingHide])
     XCTAssertEqual(machine.phase, .shown)
   }
 
   func testDragKeepsShownShelfOpenUntilMouseUpOutside() {
     var machine = EdgeShelfStateMachine(phase: .shown)
 
-    XCTAssertEqual(machine.handle(.dragBegan), [.cancelHide])
+    XCTAssertEqual(machine.handle(.dragBegan), [.forgetPendingHide])
     XCTAssertEqual(machine.phase, .dragLocked)
     XCTAssertEqual(
       machine.handle(.dragEnded(pointerInside: false)),
-      [.scheduleHide]
+      [.rememberPendingHide]
     )
-    XCTAssertEqual(machine.phase, .hidePending)
-    XCTAssertEqual(machine.handle(.hideDelayElapsed), [.hide])
+    XCTAssertEqual(machine.phase, .shown)
+    XCTAssertEqual(machine.handle(.minimumVisibilityElapsed), [.hide])
   }
 
   func testDragBeginningFromHiddenShowsAndLocksShelf() {
     var machine = EdgeShelfStateMachine()
 
-    XCTAssertEqual(machine.handle(.dragBegan), [.show])
+    XCTAssertEqual(machine.handle(.dragBegan), [.show, .scheduleMinimumVisibility])
     XCTAssertEqual(machine.phase, .dragLocked)
   }
 
@@ -71,18 +106,24 @@ final class EdgeShelfModelTests: XCTestCase {
   func testExplicitShowCancelsPendingHideAndShowsPanel() {
     var machine = EdgeShelfStateMachine(phase: .hidePending)
 
-    XCTAssertEqual(machine.handle(.explicitShow), [.cancelHide, .show])
+    XCTAssertEqual(
+      machine.handle(.explicitShow),
+      [.cancelHide, .show, .scheduleMinimumVisibility]
+    )
     XCTAssertEqual(machine.phase, .shown)
     XCTAssertEqual(machine.handle(.hideDelayElapsed), [])
     XCTAssertEqual(machine.phase, .shown)
-    XCTAssertEqual(machine.handle(.pointerExitedPanel), [.scheduleHide])
-    XCTAssertEqual(machine.phase, .hidePending)
+    XCTAssertEqual(machine.handle(.pointerExitedPanel), [.rememberPendingHide])
+    XCTAssertEqual(machine.phase, .shown)
   }
 
   func testExplicitShowCancelsPendingRevealAndShowsPanel() {
     var machine = EdgeShelfStateMachine(phase: .revealPending)
 
-    XCTAssertEqual(machine.handle(.explicitShow), [.cancelReveal, .show])
+    XCTAssertEqual(
+      machine.handle(.explicitShow),
+      [.cancelReveal, .show, .scheduleMinimumVisibility]
+    )
     XCTAssertEqual(machine.phase, .shown)
   }
 

@@ -2,6 +2,47 @@ import AppKit
 import XCTest
 @testable import BarrelMac
 
+@MainActor
+private final class TestEdgeShelfScheduledTask: EdgeShelfScheduledTask {
+  var isCancelled = false
+
+  func cancel() {
+    isCancelled = true
+  }
+}
+
+@MainActor
+private final class TestEdgeShelfScheduler: EdgeShelfScheduler {
+  private struct Scheduled {
+    let deadline: TimeInterval
+    let task: TestEdgeShelfScheduledTask
+    let action: @MainActor () -> Void
+  }
+
+  private var now: TimeInterval = 0
+  private var scheduled: [Scheduled] = []
+  var pendingTaskCount: Int { scheduled.filter { !$0.task.isCancelled }.count }
+
+  func schedule(
+    after delay: TimeInterval,
+    _ action: @escaping @MainActor () -> Void
+  ) -> any EdgeShelfScheduledTask {
+    let task = TestEdgeShelfScheduledTask()
+    scheduled.append(Scheduled(deadline: now + delay, task: task, action: action))
+    return task
+  }
+
+  func advance(by interval: TimeInterval) {
+    now += interval
+    while let index = scheduled.indices
+      .filter({ scheduled[$0].deadline <= now })
+      .min(by: { scheduled[$0].deadline < scheduled[$1].deadline }) {
+      let item = scheduled.remove(at: index)
+      if !item.task.isCancelled { item.action() }
+    }
+  }
+}
+
 final class ShelfPanelControllerTests: XCTestCase {
   private let screenA = ShelfScreen(
     displayID: 1,
@@ -80,6 +121,76 @@ final class ShelfPanelControllerTests: XCTestCase {
   }
 
   @MainActor
+  func testRevealAndMinimumVisibilityUseDeterministicThreeSecondDeadlines() {
+    let defaults = makeDefaults()
+    defaults.set(true, forKey: ShelfWindowPreferences.autoHideKey)
+    let panel = ShelfPanelController.makePanel(contentView: NSView())
+    let screen = ShelfScreen(
+      displayID: 1,
+      frame: NSRect(x: 0, y: 0, width: 600, height: 700),
+      visibleFrame: NSRect(x: 0, y: 0, width: 600, height: 680),
+      isMain: true
+    )
+    let scheduler = TestEdgeShelfScheduler()
+    var point = NSPoint(x: screen.frame.minX + 1, y: screen.frame.midY)
+    let controller = EdgeShelfController(
+      panel: panel,
+      defaults: defaults,
+      mouseLocation: { point },
+      screens: { [screen] },
+      scheduler: scheduler
+    )
+    controller.start()
+    defer { controller.stop() }
+
+    sendMouseMoved(to: point)
+    scheduler.advance(by: 2.999)
+    XCTAssertFalse(panel.frame.intersects(screen.frame))
+    scheduler.advance(by: 0.001)
+    XCTAssertTrue(panel.frame.intersects(screen.frame))
+
+    point = NSPoint(x: screen.frame.midX, y: screen.frame.midY)
+    sendMouseMoved(to: point)
+    scheduler.advance(by: 2.999)
+    XCTAssertTrue(panel.frame.intersects(screen.frame))
+    scheduler.advance(by: 0.001)
+    XCTAssertFalse(panel.frame.intersects(screen.frame))
+  }
+
+  @MainActor
+  func testDragLockTakesPrecedenceOverMinimumVisibilityDeadline() {
+    let defaults = makeDefaults()
+    defaults.set(true, forKey: ShelfWindowPreferences.autoHideKey)
+    let panel = ShelfPanelController.makePanel(contentView: NSView())
+    let scheduler = TestEdgeShelfScheduler()
+    let controller = EdgeShelfController(panel: panel, defaults: defaults, scheduler: scheduler)
+    controller.start()
+    controller.showExplicitly()
+    controller.setDropTargeted(true)
+
+    scheduler.advance(by: 3.0)
+
+    XCTAssertTrue(panel.frame.intersects(NSScreen.main!.frame))
+    controller.stop()
+  }
+
+  @MainActor
+  func testStopCancelsEveryPendingTask() {
+    let defaults = makeDefaults()
+    defaults.set(true, forKey: ShelfWindowPreferences.autoHideKey)
+    let panel = ShelfPanelController.makePanel(contentView: NSView())
+    let scheduler = TestEdgeShelfScheduler()
+    let controller = EdgeShelfController(panel: panel, defaults: defaults, scheduler: scheduler)
+    controller.start()
+    controller.showExplicitly()
+    XCTAssertEqual(scheduler.pendingTaskCount, 1)
+
+    controller.stop()
+
+    XCTAssertEqual(scheduler.pendingTaskCount, 0)
+  }
+
+  @MainActor
   func testDisablingAutoHideCancelsPendingHide() async throws {
     let defaults = makeDefaults()
     let panel = ShelfPanelController.makePanel(contentView: NSView())
@@ -148,11 +259,12 @@ final class ShelfPanelControllerTests: XCTestCase {
   }
 
   @MainActor
-  func testDropTargetExitWaitsForMouseUpBeforeEndingDragLock() async throws {
+  func testDropTargetExitWaitsForMouseUpBeforeEndingDragLock() {
     let defaults = makeDefaults()
     defaults.set(true, forKey: ShelfWindowPreferences.autoHideKey)
     let panel = ShelfPanelController.makePanel(contentView: NSView())
-    let controller = EdgeShelfController(panel: panel, defaults: defaults)
+    let scheduler = TestEdgeShelfScheduler()
+    let controller = EdgeShelfController(panel: panel, defaults: defaults, scheduler: scheduler)
     controller.start()
     guard let screen = NSScreen.main else {
       return XCTFail("Expected a main screen")
@@ -173,12 +285,11 @@ final class ShelfPanelControllerTests: XCTestCase {
 
     controller.setDropTargeted(true)
     controller.setDropTargeted(false)
-    try await Task.sleep(for: .milliseconds(300))
+    scheduler.advance(by: 3.0)
 
     XCTAssertTrue(panel.frame.intersects(screen.frame))
 
     sendLeftMouseUp(at: outsidePoint)
-    try await Task.sleep(for: .milliseconds(300))
 
     XCTAssertFalse(panel.frame.intersects(screen.frame))
   }
@@ -215,11 +326,12 @@ final class ShelfPanelControllerTests: XCTestCase {
   }
 
   @MainActor
-  func testUnrelatedDefaultsChangeDoesNotStrandPendingReveal() async throws {
+  func testUnrelatedDefaultsChangeDoesNotStrandPendingReveal() {
     let defaults = makeDefaults()
     defaults.set(true, forKey: ShelfWindowPreferences.autoHideKey)
     let panel = ShelfPanelController.makePanel(contentView: NSView())
-    let controller = EdgeShelfController(panel: panel, defaults: defaults)
+    let scheduler = TestEdgeShelfScheduler()
+    let controller = EdgeShelfController(panel: panel, defaults: defaults, scheduler: scheduler)
     controller.start()
     guard let screen = NSScreen.main else {
       return XCTFail("Expected a main screen")
@@ -238,7 +350,7 @@ final class ShelfPanelControllerTests: XCTestCase {
     defaults.set(true, forKey: "UnrelatedShelfPreference")
     controller.settingsDidChange()
 
-    try await Task.sleep(for: .milliseconds(150))
+    scheduler.advance(by: 3.0)
 
     XCTAssertTrue(panel.frame.intersects(screen.frame))
   }
