@@ -10,36 +10,41 @@ protocol ShelfFilePromiseExporting: AnyObject {
 
 @MainActor
 final class FilePromiseDragLifecycle {
-  private var delegate: ShelfFilePromiseDelegate?
-  private var writeInProgress = false
-  private var writeCompleted = false
-  private var sessionEnded = false
+  private struct SessionState {
+    var delegate: ShelfFilePromiseDelegate?
+    var writeInProgress = false
+    var writeCompleted = false
+    var sessionEnded = false
+  }
+
+  private var sessions: [UUID: SessionState] = [:]
 
   func begin(delegate: ShelfFilePromiseDelegate) {
-    self.delegate = delegate
-    writeInProgress = false
-    writeCompleted = false
-    sessionEnded = false
+    sessions[delegate.lifecycleID] = SessionState(delegate: delegate)
   }
 
-  func promiseWriteBegan() {
-    writeInProgress = true
-    writeCompleted = false
+  func promiseWriteBegan(sessionID: UUID) {
+    sessions[sessionID]?.writeInProgress = true
+    sessions[sessionID]?.writeCompleted = false
   }
 
-  func promiseWriteEnded() {
-    writeInProgress = false
-    writeCompleted = true
-    if sessionEnded { delegate = nil }
+  func promiseWriteEnded(sessionID: UUID) {
+    sessions[sessionID]?.writeInProgress = false
+    sessions[sessionID]?.writeCompleted = true
+    if sessions[sessionID]?.sessionEnded == true { sessions[sessionID] = nil }
   }
 
-  func draggingSessionEnded(operation: NSDragOperation) {
-    sessionEnded = true
-    if !writeInProgress && (operation.isEmpty || writeCompleted) { delegate = nil }
+  func draggingSessionEnded(sessionID: UUID, operation: NSDragOperation) {
+    sessions[sessionID]?.sessionEnded = true
+    guard let session = sessions[sessionID] else { return }
+    if !session.writeInProgress && (operation.isEmpty || session.writeCompleted) {
+      sessions[sessionID] = nil
+    }
   }
 }
 
 final class ShelfFilePromiseDelegate: NSObject, NSFilePromiseProviderDelegate {
+  let lifecycleID = UUID()
   private let itemID: UUID
   private let fileName: String
   private let exporter: any ShelfFilePromiseExporting
@@ -71,8 +76,8 @@ final class ShelfFilePromiseDelegate: NSObject, NSFilePromiseProviderDelegate {
     completionHandler: @escaping (Error?) -> Void
   ) {
     Task { @MainActor [self] in
-      lifecycle?.promiseWriteBegan()
-      defer { lifecycle?.promiseWriteEnded() }
+      lifecycle?.promiseWriteBegan(sessionID: lifecycleID)
+      defer { lifecycle?.promiseWriteEnded(sessionID: lifecycleID) }
       do {
         _ = try await exporter.export(itemID: itemID, to: url, fileName: fileName)
         completionHandler(nil)
@@ -112,6 +117,7 @@ struct FilePromiseDragSource<Content: View>: NSViewRepresentable {
     private weak var exporter: (any ShelfFilePromiseExporting)?
     private weak var view: NSView?
     private let lifecycle = FilePromiseDragLifecycle()
+    private var lifecycleIDs: [ObjectIdentifier: UUID] = [:]
 
     init(itemID: UUID, fileName: String, exporter: any ShelfFilePromiseExporting) {
       self.itemID = itemID
@@ -162,7 +168,8 @@ struct FilePromiseDragSource<Content: View>: NSViewRepresentable {
         NSRect(x: origin.x - 24, y: origin.y - 24, width: 48, height: 48),
         contents: image
       )
-      view.beginDraggingSession(with: [draggingItem], event: event, source: self)
+      let session = view.beginDraggingSession(with: [draggingItem], event: event, source: self)
+      lifecycleIDs[ObjectIdentifier(session)] = delegate.lifecycleID
     }
 
     nonisolated func draggingSession(
@@ -178,7 +185,11 @@ struct FilePromiseDragSource<Content: View>: NSViewRepresentable {
       operation: NSDragOperation
     ) {
       Task { @MainActor [weak self] in
-        self?.lifecycle.draggingSessionEnded(operation: operation)
+        guard let self,
+              let sessionID = lifecycleIDs.removeValue(forKey: ObjectIdentifier(session)) else {
+          return
+        }
+        lifecycle.draggingSessionEnded(sessionID: sessionID, operation: operation)
       }
     }
   }

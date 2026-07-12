@@ -108,7 +108,7 @@ final class FilePromiseDragSourceTests: XCTestCase {
     delegate = nil
 
     XCTAssertNotNil(weakDelegate)
-    lifecycle.draggingSessionEnded(operation: [])
+    lifecycle.draggingSessionEnded(sessionID: weakDelegate!.lifecycleID, operation: [])
 
     XCTAssertNil(weakDelegate)
     XCTAssertEqual(exporter.calls.count, 0)
@@ -128,7 +128,7 @@ final class FilePromiseDragSourceTests: XCTestCase {
 
     lifecycle.begin(delegate: delegate!)
     delegate = nil
-    lifecycle.draggingSessionEnded(operation: .copy)
+    lifecycle.draggingSessionEnded(sessionID: weakDelegate!.lifecycleID, operation: .copy)
 
     XCTAssertNotNil(weakDelegate)
     weakDelegate!.filePromiseProvider(
@@ -166,9 +166,59 @@ final class FilePromiseDragSourceTests: XCTestCase {
     await waitUntil { didComplete }
 
     XCTAssertNotNil(weakDelegate)
-    lifecycle.draggingSessionEnded(operation: .copy)
+    lifecycle.draggingSessionEnded(sessionID: weakDelegate!.lifecycleID, operation: .copy)
 
     XCTAssertNil(weakDelegate)
+  }
+
+  func testOverlappingAcceptedDragsRetainEachDelegateUntilItsOwnWriteCompletes() async {
+    let lifecycle = FilePromiseDragLifecycle()
+    let exporterA = FakeExporter(suspends: true)
+    var delegateA: ShelfFilePromiseDelegate? = ShelfFilePromiseDelegate(
+      itemID: UUID(),
+      fileName: "a.bin",
+      exporter: exporterA,
+      lifecycle: lifecycle
+    )
+    weak let weakDelegateA = delegateA
+    let providerA = NSFilePromiseProvider(fileType: "public.data", delegate: delegateA!)
+
+    lifecycle.begin(delegate: delegateA!)
+    delegateA!.filePromiseProvider(
+      providerA,
+      writePromiseTo: URL(fileURLWithPath: "/tmp/promise-a")
+    ) { _ in }
+    await exporterA.waitForCall()
+    lifecycle.draggingSessionEnded(sessionID: weakDelegateA!.lifecycleID, operation: .copy)
+    delegateA = nil
+
+    let exporterB = FakeExporter(suspends: true)
+    var delegateB: ShelfFilePromiseDelegate? = ShelfFilePromiseDelegate(
+      itemID: UUID(),
+      fileName: "b.bin",
+      exporter: exporterB,
+      lifecycle: lifecycle
+    )
+    weak let weakDelegateB = delegateB
+    let providerB = NSFilePromiseProvider(fileType: "public.data", delegate: delegateB!)
+
+    lifecycle.begin(delegate: delegateB!)
+    lifecycle.draggingSessionEnded(sessionID: weakDelegateB!.lifecycleID, operation: .copy)
+    delegateB = nil
+
+    exporterA.resume()
+    await waitUntil { weakDelegateA == nil }
+
+    XCTAssertNotNil(weakDelegateB)
+    weakDelegateB!.filePromiseProvider(
+      providerB,
+      writePromiseTo: URL(fileURLWithPath: "/tmp/promise-b")
+    ) { _ in }
+    await exporterB.waitForCall()
+    XCTAssertNotNil(weakDelegateB)
+
+    exporterB.resume()
+    await waitUntil { weakDelegateB == nil }
   }
 
   private func waitUntil(
