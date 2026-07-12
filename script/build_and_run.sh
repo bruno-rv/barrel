@@ -51,6 +51,8 @@ cat >"$INFO_PLIST" <<PLIST
   <string>$MIN_SYSTEM_VERSION</string>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Barrel uses Finder Automation only when Quick Send opens to read the files you currently selected.</string>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
 </dict>

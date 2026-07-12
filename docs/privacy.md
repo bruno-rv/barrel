@@ -7,6 +7,23 @@ Barrel uses AppKit local and global mouse-event monitors transiently to reveal
 the shelf at the display edge. It doesn't store pointer coordinates or request
 Accessibility access.
 
+## Finder Automation and Quick Send
+
+Quick Send asks Finder for the files you currently selected when you open the
+panel. macOS requests Finder Automation permission the first time Quick Send
+needs it. Barrel doesn't monitor Finder continuously, and it doesn't transmit
+Finder selection data.
+
+You can configure the Quick Send shortcut independently from the Shelf
+shortcut. In the Quick Send panel, use the Up and Down Arrow keys to select a
+result, Return for its primary action, Command-Return for its secondary action,
+and Escape to leave a secondary list or close the panel.
+
+Quick Send lists destinations from successful exports for 24 hours. It
+preserves exact filenames and fails an export if the destination already has a
+file with the same name. It doesn't overwrite the existing file or add a
+suffix.
+
 ## Clipboard capture
 
 Clipboard history is off by default. When you enable it, Barrel checks for
@@ -73,8 +90,8 @@ depend on the network.
 See [Configure optional CloudKit sync](cloudkit-setup.md) for provisioning and
 manual test requirements.
 
-## Global shortcut
+## Global shortcuts
 
-The global shortcut uses the macOS Carbon hot-key service. Barrel reports a
-registration error in settings if another app or the system reserves the
-selected key combination. The shortcut doesn't record typed keys.
+The Shelf and Quick Send shortcuts use the macOS Carbon hot-key service.
+Barrel reports a registration error in settings if another app or the system
+reserves a selected key combination. The shortcuts don't record typed keys.

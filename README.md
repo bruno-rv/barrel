@@ -38,9 +38,12 @@ You can change the lifetime or pin an item to keep it.
 
 Barrel provides these system integrations:
 
-- A configurable global shortcut. The default is
+- A configurable Shelf shortcut. The default is
   **Control-Option-Space**. You can also choose **Control-Shift-Space** or
   **Command-Option-B**.
+- A separate, configurable Quick Send shortcut. The default is
+  **Control-Shift-Space**. Quick Send opens a searchable panel for the current
+  Finder selection, shelf items, History, and recent destinations.
 - App Intents for holding files, text, and links, showing the shelf, and
   clearing expired items.
 - Core Spotlight results for live, non-clipboard items. Barrel indexes item
@@ -48,6 +51,23 @@ Barrel provides these system integrations:
 
 Selecting a Barrel Spotlight result opens the shelf and selects that item.
 See [Privacy and local data](docs/privacy.md) for indexing details.
+
+## Send items with the keyboard
+
+Open Quick Send with its shortcut, then type to filter the results. Use the Up
+and Down Arrow keys to select a result. Press Return for its primary action,
+Command-Return for its secondary action, and Escape to leave a secondary list
+or close the panel.
+
+Quick Send can import the files currently selected in Finder. macOS asks for
+Finder Automation permission only when Quick Send first tries to read that
+selection. Barrel doesn't monitor Finder continuously or transmit Finder
+selection data.
+
+Destinations from successful exports remain available in Quick Send for 24
+hours. Quick Send preserves the exact filename when it exports a file. If that
+name already exists at the destination, the export fails without overwriting
+the existing file or adding a suffix.
 
 ## Retention, Trash, and storage
 
