@@ -87,6 +87,50 @@ final class ShelfStoreHistoryTests: XCTestCase {
     XCTAssertTrue(store.selectedIDs.isEmpty)
   }
 
+  func testClickSelectsSingleItemAndShiftClickSelectsRange() async throws {
+    let fixture = try await Fixture()
+    for name in ["A.txt", "B.txt", "C.txt"] {
+      let url = fixture.root.appendingPathComponent(name)
+      try Data(name.utf8).write(to: url)
+      _ = await fixture.repository.importFiles([url], origin: .imported, expiresAt: nil)
+    }
+    let store = ShelfStore(repository: fixture.repository, indexesSpotlight: false, loadOnInit: false)
+    await store.refresh()
+    // Fixture already imported Source.txt plus A/B/C → at least 4 items.
+    let items = store.visibleItems
+    XCTAssertGreaterThanOrEqual(items.count, 3)
+    let first = items[0]
+    let last = items[min(2, items.count - 1)]
+
+    store.select(first)
+    XCTAssertEqual(store.selectedIDs, [first.id])
+    XCTAssertEqual(store.selectedItemID, first.id)
+
+    store.select(last, shift: true)
+    let expected = Set(items[0...min(2, items.count - 1)].map(\.id))
+    XCTAssertEqual(store.selectedIDs, expected)
+    XCTAssertEqual(store.selectedItemID, last.id)
+  }
+
+  func testCommandClickTogglesItemInSelection() async throws {
+    let fixture = try await Fixture()
+    let second = fixture.root.appendingPathComponent("Second.txt")
+    try Data("more".utf8).write(to: second)
+    _ = await fixture.repository.importFiles([second], origin: .imported, expiresAt: nil)
+    let store = ShelfStore(repository: fixture.repository, indexesSpotlight: false, loadOnInit: false)
+    await store.refresh()
+    let first = try XCTUnwrap(store.visibleItems.first)
+    let other = try XCTUnwrap(store.visibleItems.dropFirst().first)
+
+    store.select(first)
+    store.select(other, command: true)
+
+    XCTAssertEqual(store.selectedIDs, [first.id, other.id])
+
+    store.select(first, command: true)
+    XCTAssertEqual(store.selectedIDs, [other.id])
+  }
+
   func testHistoryRefreshAndUndoKeepBucketSelectionEmpty() async throws {
     let fixture = try await Fixture()
     let export = try await fixture.export(fileName: "History.txt")

@@ -37,6 +37,8 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
   private let spotlightIndexer = SpotlightIndexer()
   private var fileURLsByItemID: [UUID: URL] = [:]
   private var localOverlayItemIDs: Set<UUID> = []
+  /// Anchor for Finder-style shift-click range selection.
+  private var selectionAnchorID: ShelfItem.ID?
   private var clipboardTask: Task<Void, Never>?
   private var spotlightTask: Task<Void, Never>?
   private var lastPasteboardChangeCount = NSPasteboard.general.changeCount
@@ -70,8 +72,7 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
   }
 
   func openHistory() async {
-    selectedIDs = []
-    selectedItemID = nil
+    clearSelection()
     viewMode = .history
     await refresh()
   }
@@ -219,22 +220,66 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
     }
   }
 
+  func clearSelection() {
+    selectedIDs = []
+    selectedItemID = nil
+    selectionAnchorID = nil
+  }
+
   func toggleSelection(for item: ShelfItem) {
-    guard item.trashedAt == nil,
-          item.deletedAt == nil,
-          visibleItems.contains(where: { $0.id == item.id }) else {
-      return
-    }
+    guard isSelectable(item) else { return }
     if selectedIDs.contains(item.id) {
       selectedIDs.remove(item.id)
+      if selectedItemID == item.id {
+        selectedItemID = selectedIDs.first
+      }
     } else {
       selectedIDs.insert(item.id)
       selectedItemID = item.id
     }
+    // Keep the last toggled item as anchor for a following shift-click.
+    selectionAnchorID = item.id
   }
 
-  func select(_ item: ShelfItem) {
+  /// Primary selection click. `shift` selects a contiguous range (Finder-style);
+  /// `command` toggles the item in the multi-selection.
+  func select(_ item: ShelfItem, shift: Bool = false, command: Bool = false) {
+    guard isSelectable(item) || item.trashedAt != nil else { return }
+
+    if shift {
+      selectRange(to: item)
+      return
+    }
+    if command {
+      toggleSelection(for: item)
+      return
+    }
+
     selectedItemID = item.id
+    selectedIDs = [item.id]
+    selectionAnchorID = item.id
+  }
+
+  /// Selects every visible item from the selection anchor through `item` (inclusive).
+  func selectRange(to item: ShelfItem) {
+    guard isSelectable(item) || item.trashedAt != nil else { return }
+    let orderedIDs = visibleItems.map(\.id)
+    guard let endIndex = orderedIDs.firstIndex(of: item.id) else { return }
+
+    let anchor = selectionAnchorID
+      ?? selectedItemID
+      ?? orderedIDs.first
+    guard let anchor,
+          let startIndex = orderedIDs.firstIndex(of: anchor) else {
+      select(item)
+      return
+    }
+
+    let lower = min(startIndex, endIndex)
+    let upper = max(startIndex, endIndex)
+    selectedIDs = Set(orderedIDs[lower...upper])
+    selectedItemID = item.id
+    // Anchor stays so successive shift-clicks extend from the original click.
   }
 
   /// Marks every currently visible shelf item for bulk actions (stack, trash, drag).
@@ -244,6 +289,11 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
     guard !ids.isEmpty else { return }
     selectedIDs = Set(ids)
     selectedItemID = ids.first
+    selectionAnchorID = ids.first
+  }
+
+  private func isSelectable(_ item: ShelfItem) -> Bool {
+    item.deletedAt == nil && visibleItems.contains(where: { $0.id == item.id })
   }
 
   func stackSelectedItems() {
@@ -253,7 +303,7 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
       do {
         let stack = try await repository.stack(ids: ids)
         notifyRepositoryChange()
-        selectedIDs = []
+        clearSelection()
         await refresh(preferredSelection: stack.id)
       } catch {
         errorMessage = error.localizedDescription
@@ -552,9 +602,11 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
       visibleItems.lazy.filter { $0.trashedAt == nil && $0.deletedAt == nil }.map(\.id)
     )
     selectedIDs.formIntersection(liveVisibleIDs.subtracting(localOverlayItemIDs))
+    if let anchor = selectionAnchorID, !visibleIDs.contains(anchor) {
+      selectionAnchorID = selectedItemID ?? selectedIDs.first
+    }
     if viewMode == .history {
-      selectedIDs = []
-      selectedItemID = nil
+      clearSelection()
       return
     }
     if let preferredSelection, visibleIDs.contains(preferredSelection) {

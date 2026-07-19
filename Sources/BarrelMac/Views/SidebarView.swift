@@ -21,7 +21,12 @@ struct SidebarView: View {
             .tag(item.id)
             .contentShape(Rectangle())
             .onTapGesture {
-              store.select(item)
+              let flags = NSEvent.modifierFlags
+              store.select(
+                item,
+                shift: flags.contains(.shift),
+                command: flags.contains(.command)
+              )
             }
             .contextMenu {
               if item.trashedAt != nil {

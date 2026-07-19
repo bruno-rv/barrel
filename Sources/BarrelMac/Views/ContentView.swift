@@ -1,3 +1,4 @@
+import AppKit
 import BarrelCore
 import SwiftUI
 import UniformTypeIdentifiers
@@ -214,7 +215,14 @@ struct ContentView: View {
             isSelected: store.selectedItemID == item.id,
             isMarked: store.selectedIDs.contains(item.id),
             fileURL: store.fileURL(for: item),
-            select: { store.select(item) },
+            select: {
+              let flags = NSEvent.modifierFlags
+              store.select(
+                item,
+                shift: flags.contains(.shift),
+                command: flags.contains(.command)
+              )
+            },
             toggleMark: { store.toggleSelection(for: item) },
             open: { store.open(item) },
             reveal: { store.reveal(item) },
@@ -388,7 +396,7 @@ private struct ShelfTile: View {
             .foregroundStyle(isMarked ? .white : .white.opacity(0.42))
         }
         .buttonStyle(.plain)
-        .help("Mark for stack")
+        .help("Toggle selection (⌘-click)")
       }
     }
     .padding(8)
@@ -398,15 +406,15 @@ private struct ShelfTile: View {
         .strokeBorder(isSelected ? Color.white.opacity(0.34) : Color.white.opacity(0.08))
     )
     .contentShape(Rectangle())
-    .onTapGesture(perform: select)
     .onTapGesture(count: 2, perform: open)
+    .onTapGesture(perform: select)
     .contextMenu {
       if item.trashedAt != nil {
         Button("Restore", action: restore)
         Button("Delete Permanently", role: .destructive, action: deletePermanently)
       } else {
         if !isReadOnlyOverlay {
-          Button(isMarked ? "Unmark" : "Mark for Stack", action: toggleMark)
+          Button(isMarked ? "Deselect" : "Select", action: toggleMark)
         }
         Button("Open", action: open)
         if fileURL != nil {

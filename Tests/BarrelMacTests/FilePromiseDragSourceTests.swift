@@ -49,6 +49,59 @@ final class FilePromiseDragSourceTests: XCTestCase {
     XCTAssertNil(completions[0])
   }
 
+  func testDelegateTreatsFinderPromiseFileURLAsParentDirectoryPlusLeafName() async {
+    let itemID = UUID()
+    // Finder’s writePromiseTo is a file URL (often not yet created).
+    let promiseFile = URL(fileURLWithPath: "/Users/bruno/Documents/CLAUDE.md", isDirectory: false)
+    let exporter = FakeExporter()
+    let delegate = ShelfFilePromiseDelegate(
+      itemID: itemID,
+      fileName: "CLAUDE.md",
+      exporter: exporter
+    )
+    let provider = NSFilePromiseProvider(fileType: "public.data", delegate: delegate)
+    var completions: [Error?] = []
+
+    delegate.filePromiseProvider(provider, writePromiseTo: promiseFile) {
+      completions.append($0)
+    }
+    await waitUntil { completions.count == 1 }
+
+    XCTAssertEqual(exporter.calls, [
+      .init(
+        itemID: itemID,
+        directoryURL: URL(fileURLWithPath: "/Users/bruno/Documents", isDirectory: true),
+        fileName: "CLAUDE.md"
+      )
+    ])
+    XCTAssertNil(completions[0])
+  }
+
+  func testFilePromiseExportDestinationResolver() {
+    let directory = URL(fileURLWithPath: "/tmp/exports", isDirectory: true)
+    let asDir = FilePromiseExportDestination.resolve(
+      url: directory,
+      fallbackFileName: "fallback.bin"
+    )
+    XCTAssertEqual(asDir.directoryURL.standardizedFileURL, directory.standardizedFileURL)
+    XCTAssertEqual(asDir.fileName, "fallback.bin")
+
+    let existingDir = FilePromiseExportDestination.resolve(
+      url: URL(fileURLWithPath: "/tmp", isDirectory: false),
+      fallbackFileName: "fallback.bin"
+    )
+    XCTAssertEqual(existingDir.directoryURL.standardizedFileURL.path, "/tmp")
+    XCTAssertEqual(existingDir.fileName, "fallback.bin")
+
+    let fileURL = URL(fileURLWithPath: "/tmp/does-not-exist-yet/Report.pdf", isDirectory: false)
+    let asFile = FilePromiseExportDestination.resolve(
+      url: fileURL,
+      fallbackFileName: "fallback.bin"
+    )
+    XCTAssertEqual(asFile.directoryURL.path, "/tmp/does-not-exist-yet")
+    XCTAssertEqual(asFile.fileName, "Report.pdf")
+  }
+
   func testDelegateForwardsErrorOnce() async {
     let expected = TestError.exportFailed
     let exporter = FakeExporter(result: .failure(expected))
