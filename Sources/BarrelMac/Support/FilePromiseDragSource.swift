@@ -46,6 +46,32 @@ final class FilePromiseDragLifecycle {
   }
 }
 
+enum FilePromiseExportDestination {
+  /// NSFilePromiseProvider passes a *file* URL for `writePromiseTo`.
+  /// Repository export expects a *directory* plus a leaf file name.
+  static func resolve(
+    url: URL,
+    fallbackFileName: String
+  ) -> (directoryURL: URL, fileName: String) {
+    let standardized = url.standardizedFileURL
+    if standardized.hasDirectoryPath {
+      return (standardized, fallbackFileName)
+    }
+
+    var isDirectory: ObjCBool = false
+    if FileManager.default.fileExists(atPath: standardized.path, isDirectory: &isDirectory),
+       isDirectory.boolValue {
+      return (standardized, fallbackFileName)
+    }
+
+    let leaf = standardized.lastPathComponent
+    if leaf.isEmpty || leaf == "/" {
+      return (standardized, fallbackFileName)
+    }
+    return (standardized.deletingLastPathComponent(), leaf)
+  }
+}
+
 final class ShelfFilePromiseDelegate: NSObject, NSFilePromiseProviderDelegate {
   let lifecycleID = UUID()
   private let itemID: UUID
@@ -82,7 +108,15 @@ final class ShelfFilePromiseDelegate: NSObject, NSFilePromiseProviderDelegate {
       lifecycle?.promiseWriteBegan(sessionID: lifecycleID)
       defer { lifecycle?.promiseWriteEnded(sessionID: lifecycleID) }
       do {
-        _ = try await exporter.export(itemID: itemID, to: url, fileName: fileName)
+        let destination = FilePromiseExportDestination.resolve(
+          url: url,
+          fallbackFileName: fileName
+        )
+        _ = try await exporter.export(
+          itemID: itemID,
+          to: destination.directoryURL,
+          fileName: destination.fileName
+        )
         completionHandler(nil)
       } catch {
         completionHandler(error)
