@@ -25,6 +25,12 @@ struct SettingsView: View {
         .pickerStyle(.segmented)
 
         Toggle("Auto-hide shelf at screen edge", isOn: $autoHideShelf)
+
+        Text(autoHideShelf
+          ? "Touch the extreme \(shelfEdge) edge (works over full-screen apps) and the shelf appears instantly. It hides 3 seconds after the pointer leaves the shelf."
+          : "The shelf stays visible on the \(shelfEdge) edge.")
+          .font(.footnote)
+          .foregroundStyle(.secondary)
       }
 
       Section("Clipboard Privacy") {
