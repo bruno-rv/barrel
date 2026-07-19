@@ -43,6 +43,12 @@ private struct ShelfMenuContent: View {
 
     Divider()
 
+    Button("Select All") {
+      store.selectAllVisibleItems()
+    }
+    .keyboardShortcut("a")
+    .disabled(store.visibleItems.isEmpty || store.viewMode == .history)
+
     Button("Stack Selection") {
       store.stackSelectedItems()
     }

@@ -71,7 +71,7 @@ final class EdgeShelfController {
   private var globalMonitor: Any?
   private var observers: [NSObjectProtocol] = []
   private var revealTask: (any EdgeShelfScheduledTask)?
-  private var minimumVisibilityTask: (any EdgeShelfScheduledTask)?
+  private var hideTask: (any EdgeShelfScheduledTask)?
   private var lifecycleGeneration = 0
   private var isRunning = false
   private var isDropTargeted = false
@@ -179,7 +179,7 @@ final class EdgeShelfController {
     observers.forEach(NSWorkspace.shared.notificationCenter.removeObserver)
     observers.removeAll()
     cancelReveal()
-    cancelMinimumVisibility()
+    cancelHide()
     isDropTargeted = false
     machine = EdgeShelfStateMachine()
   }
@@ -207,7 +207,6 @@ final class EdgeShelfController {
 
     if autoHideChanged {
       cancelReveal()
-      if !newAutoHide { cancelMinimumVisibility() }
       let point = mouseLocation()
       apply(machine.handle(.autoHideChanged(
         isEnabled: newAutoHide,
@@ -231,6 +230,8 @@ final class EdgeShelfController {
     let display = geometry(for: screen)
     let insidePanel = panel?.frame.contains(point) == true
     let atEdge = layout.isActivationPoint(point, edge: edge, display: display)
+    // Activation strip counts as interacting so hide does not start while still on the edge.
+    let interacting = insidePanel || atEdge
     let isActive = [.shown, .hidePending, .dragLocked].contains(machine.phase)
 
     if isActive, screen.displayID != trackedDisplayID {
@@ -239,13 +240,13 @@ final class EdgeShelfController {
         return
       }
       placePanel(shown: true, on: screen)
-      panel?.orderFrontRegardless()
+      orderPanelFront()
     }
 
     switch event.type {
     case .leftMouseDragged:
       let alreadyShown = [.shown, .hidePending, .dragLocked].contains(machine.phase)
-      if alreadyShown || insidePanel || atEdge {
+      if alreadyShown || interacting {
         if machine.phase == .hidden && atEdge {
           apply(machine.handle(.edgeEntered), point: point)
         }
@@ -253,11 +254,11 @@ final class EdgeShelfController {
       }
     case .leftMouseUp:
       isDropTargeted = false
-      apply(machine.handle(.dragEnded(pointerInside: insidePanel)), point: point)
+      apply(machine.handle(.dragEnded(pointerInside: interacting)), point: point)
     default:
       apply(machine.handle(atEdge ? .edgeEntered : .edgeExited), point: point)
       if autoHideEnabled {
-        apply(machine.handle(insidePanel ? .pointerEnteredPanel : .pointerExitedPanel), point: point)
+        apply(machine.handle(interacting ? .pointerEnteredPanel : .pointerExitedPanel), point: point)
       }
     }
   }
@@ -267,8 +268,12 @@ final class EdgeShelfController {
       switch effect {
       case .scheduleReveal:
         cancelReveal()
+        if EdgeShelfTiming.revealDelay <= 0 {
+          apply(machine.handle(.revealDelayElapsed), point: point)
+          break
+        }
         let generation = lifecycleGeneration
-        revealTask = scheduler.schedule(after: 3.0) { [weak self] in
+        revealTask = scheduler.schedule(after: EdgeShelfTiming.revealDelay) { [weak self] in
           guard let self, self.isCurrent(generation) else { return }
           self.revealTask = nil
           self.apply(self.machine.handle(.revealDelayElapsed), point: self.mouseLocation())
@@ -277,35 +282,50 @@ final class EdgeShelfController {
         cancelReveal()
       case .show:
         cancelReveal()
+        cancelHide()
         setPanelFrame(shown: true, point: point)
-        panel?.orderFrontRegardless()
-      case .scheduleMinimumVisibility:
-        cancelMinimumVisibility()
-        let generation = lifecycleGeneration
-        minimumVisibilityTask = scheduler.schedule(after: 3.0) { [weak self] in
-          guard let self, self.isCurrent(generation) else { return }
-          self.minimumVisibilityTask = nil
-          self.apply(self.machine.handle(.minimumVisibilityElapsed), point: self.mouseLocation())
-        }
-      case .rememberPendingHide, .forgetPendingHide:
-        break
+        orderPanelFront()
       case .scheduleHide:
-        cancelReveal()
-        apply(machine.handle(.hideDelayElapsed), point: point)
+        cancelHide()
+        let generation = lifecycleGeneration
+        hideTask = scheduler.schedule(after: EdgeShelfTiming.hideDelay) { [weak self] in
+          guard let self, self.isCurrent(generation) else { return }
+          // Re-check pointer: stay open if still over panel or activation strip.
+          let point = self.mouseLocation()
+          if let screen = self.resolvedScreen(containing: point) {
+            let display = self.geometry(for: screen)
+            let inside = self.panel?.frame.contains(point) == true
+            let atEdge = self.layout.isActivationPoint(point, edge: self.edge, display: display)
+            if inside || atEdge {
+              self.apply(self.machine.handle(.pointerEnteredPanel), point: point)
+              return
+            }
+          }
+          self.hideTask = nil
+          self.apply(self.machine.handle(.hideDelayElapsed), point: point)
+        }
       case .cancelHide:
-        break
+        cancelHide()
       case .hide:
         cancelReveal()
-        cancelMinimumVisibility()
+        cancelHide()
         setPanelFrame(shown: false, point: point)
       }
     }
   }
 
+  private func orderPanelFront() {
+    guard let panel else { return }
+    // Re-assert level and collection behavior so full-screen apps cannot bury the shelf.
+    panel.level = ShelfPanelController.shelfWindowLevel
+    panel.collectionBehavior = ShelfPanelController.shelfCollectionBehavior
+    panel.orderFrontRegardless()
+  }
+
   private func refreshPanelFrame() {
     let shown = [.shown, .hidePending, .dragLocked].contains(machine.phase)
     setPanelFrame(shown: shown, point: mouseLocation())
-    if shown { panel?.orderFrontRegardless() }
+    if shown { orderPanelFront() }
   }
 
   private func setPanelFrame(shown: Bool, point: NSPoint) {
@@ -357,15 +377,15 @@ final class EdgeShelfController {
     revealTask = nil
   }
 
-  private func cancelMinimumVisibility() {
-    minimumVisibilityTask?.cancel()
-    minimumVisibilityTask = nil
+  private func cancelHide() {
+    hideTask?.cancel()
+    hideTask = nil
   }
 
   deinit {
     MainActor.assumeIsolated {
       revealTask?.cancel()
-      minimumVisibilityTask?.cancel()
+      hideTask?.cancel()
     }
     if let localMonitor { NSEvent.removeMonitor(localMonitor) }
     if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }

@@ -237,6 +237,15 @@ final class ShelfStore: ObservableObject, ShelfFilePromiseExporting {
     selectedItemID = item.id
   }
 
+  /// Marks every currently visible shelf item for bulk actions (stack, trash, drag).
+  func selectAllVisibleItems() {
+    guard viewMode != .history else { return }
+    let ids = visibleItems.map(\.id)
+    guard !ids.isEmpty else { return }
+    selectedIDs = Set(ids)
+    selectedItemID = ids.first
+  }
+
   func stackSelectedItems() {
     let ids = Array(selectedIDs)
     guard ids.count > 1, localOverlayItemIDs.isDisjoint(with: ids) else { return }

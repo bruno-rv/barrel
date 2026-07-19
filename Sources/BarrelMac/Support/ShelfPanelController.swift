@@ -8,6 +8,17 @@ final class ShelfPanel: NSPanel {
 
 @MainActor
 final class ShelfPanelController {
+  /// Above ordinary and full-screen app windows; below the menu bar itself.
+  static let shelfWindowLevel = NSWindow.Level(
+    rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) + 2
+  )
+  static let shelfCollectionBehavior: NSWindow.CollectionBehavior = [
+    .canJoinAllSpaces,
+    .fullScreenAuxiliary,
+    .stationary,
+    .ignoresCycle
+  ]
+
   private let panel: ShelfPanel
   private let edgeController: EdgeShelfController
 
@@ -37,15 +48,10 @@ final class ShelfPanelController {
     panel.titleVisibility = .hidden
     panel.titlebarAppearsTransparent = true
     panel.isFloatingPanel = true
-    panel.level = .statusBar
+    panel.level = shelfWindowLevel
     panel.becomesKeyOnlyIfNeeded = true
     panel.hidesOnDeactivate = false
-    panel.collectionBehavior = [
-      .canJoinAllSpaces,
-      .fullScreenAuxiliary,
-      .stationary,
-      .ignoresCycle
-    ]
+    panel.collectionBehavior = shelfCollectionBehavior
     contentView.frame = NSRect(origin: .zero, size: size)
     panel.contentView = contentView
     return panel

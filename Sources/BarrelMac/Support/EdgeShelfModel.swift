@@ -17,7 +17,6 @@ enum EdgeShelfEvent: Equatable {
   case edgeEntered
   case edgeExited
   case revealDelayElapsed
-  case minimumVisibilityElapsed
   case pointerEnteredPanel
   case pointerExitedPanel
   case hideDelayElapsed
@@ -31,111 +30,68 @@ enum EdgeShelfEffect: Equatable {
   case scheduleReveal
   case cancelReveal
   case show
-  case scheduleMinimumVisibility
-  case rememberPendingHide
-  case forgetPendingHide
   case scheduleHide
   case cancelHide
   case hide
 }
 
+enum EdgeShelfTiming {
+  /// Reveal is immediate on edge contact; delay kept at 0 for any scheduled path.
+  static let revealDelay: TimeInterval = 0
+  /// How long the pointer must stay off the shelf (and activation strip) before it hides.
+  static let hideDelay: TimeInterval = 3.0
+}
+
 struct EdgeShelfStateMachine {
   private(set) var phase: EdgeShelfPhase
-  private var isMinimumVisibilityElapsed: Bool
-  private var isPointerInsidePanel: Bool
-  private var isDragActive: Bool
-  private var hasPendingHide = false
 
   init(phase: EdgeShelfPhase = .hidden) {
     self.phase = phase
-    self.isMinimumVisibilityElapsed = phase == .hidePending
-    self.isPointerInsidePanel = phase == .shown
-    self.isDragActive = phase == .dragLocked
   }
 
   mutating func handle(_ event: EdgeShelfEvent) -> [EdgeShelfEffect] {
-    var effects = transition(for: event)
-    let establishesFreshMinimumVisibility: Bool
-    switch event {
-    case .explicitShow, .autoHideChanged(isEnabled: false, pointerInside: _):
-      establishesFreshMinimumVisibility = true
-    default:
-      establishesFreshMinimumVisibility = effects.contains(.show)
-    }
-
-    if establishesFreshMinimumVisibility,
-       [.shown, .dragLocked].contains(phase) {
-      isMinimumVisibilityElapsed = false
-      if !effects.contains(.scheduleMinimumVisibility) {
-        effects.append(.scheduleMinimumVisibility)
-      }
-    }
-    return effects
-  }
-
-  private mutating func transition(for event: EdgeShelfEvent) -> [EdgeShelfEffect] {
     switch (phase, event) {
     case (.hidden, .edgeEntered):
-      phase = .revealPending
-      return [.scheduleReveal]
+      // Instant reveal — no dwell on the extreme edge.
+      phase = .shown
+      return [.show]
     case (.revealPending, .edgeExited):
       phase = .hidden
       return [.cancelReveal]
-    case (.revealPending, .revealDelayElapsed):
+    case (.revealPending, .revealDelayElapsed), (.revealPending, .edgeEntered):
       phase = .shown
       return [.show]
-    case (.shown, .pointerExitedPanel):
-      isPointerInsidePanel = false
-      if isMinimumVisibilityElapsed {
-        phase = .hidden
-        return [.hide]
-      }
-      hasPendingHide = true
-      return [.rememberPendingHide]
-    case (.shown, .pointerEnteredPanel), (.hidePending, .pointerEnteredPanel):
-      isPointerInsidePanel = true
-      hasPendingHide = false
+    case (.hidePending, .edgeEntered):
+      // Still on the activation strip: cancel the hide countdown.
       phase = .shown
-      return [.forgetPendingHide]
-    case (.shown, .minimumVisibilityElapsed), (.dragLocked, .minimumVisibilityElapsed):
-      isMinimumVisibilityElapsed = true
-      if hasPendingHide && !isPointerInsidePanel && !isDragActive {
-        hasPendingHide = false
-        phase = .hidden
-        return [.hide]
-      }
-      return []
+      return [.cancelHide]
+
+    case (.shown, .pointerExitedPanel):
+      phase = .hidePending
+      return [.scheduleHide]
+    case (.hidePending, .pointerEnteredPanel):
+      phase = .shown
+      return [.cancelHide]
     case (.hidePending, .hideDelayElapsed):
       phase = .hidden
       return [.hide]
+
     case (.shown, .dragBegan), (.hidePending, .dragBegan):
-      isDragActive = true
-      hasPendingHide = false
       phase = .dragLocked
-      return [.forgetPendingHide]
+      return [.cancelHide]
     case (.hidden, .dragBegan):
-      isDragActive = true
       phase = .dragLocked
       return [.show]
     case (.revealPending, .dragBegan):
-      isDragActive = true
       phase = .dragLocked
       return [.cancelReveal, .show]
     case (.dragLocked, .dragEnded(pointerInside: true)):
-      isDragActive = false
-      isPointerInsidePanel = true
       phase = .shown
       return []
     case (.dragLocked, .dragEnded(pointerInside: false)):
-      isDragActive = false
-      isPointerInsidePanel = false
-      if isMinimumVisibilityElapsed {
-        phase = .hidden
-        return [.hide]
-      }
-      hasPendingHide = true
-      phase = .shown
-      return [.rememberPendingHide]
+      phase = .hidePending
+      return [.scheduleHide]
+
     case (.revealPending, .explicitShow):
       phase = .shown
       return [.cancelReveal, .show]
@@ -147,32 +103,35 @@ struct EdgeShelfStateMachine {
       return [.show]
     case (.dragLocked, .explicitShow):
       return [.show]
-    case (.revealPending, .autoHideChanged(isEnabled: false, pointerInside: let pointerInside)):
+
+    case (.revealPending, .autoHideChanged(isEnabled: false, pointerInside: _)):
       phase = .shown
-      isPointerInsidePanel = pointerInside
       return [.cancelReveal, .show]
-    case (.hidePending, .autoHideChanged(isEnabled: false, pointerInside: let pointerInside)):
+    case (.hidePending, .autoHideChanged(isEnabled: false, pointerInside: _)):
       phase = .shown
-      isPointerInsidePanel = pointerInside
       return [.cancelHide, .show]
-    case (.hidden, .autoHideChanged(isEnabled: false, pointerInside: let pointerInside)):
+    case (.hidden, .autoHideChanged(isEnabled: false, pointerInside: _)):
       phase = .shown
-      isPointerInsidePanel = pointerInside
       return [.show]
-    case (.shown, .autoHideChanged(isEnabled: false, pointerInside: let pointerInside)):
-      isPointerInsidePanel = pointerInside
-      hasPendingHide = false
+    case (.shown, .autoHideChanged(isEnabled: false, pointerInside: _)):
       return []
     case (.dragLocked, .autoHideChanged(isEnabled: false, pointerInside: _)):
       return []
     case (.shown, .autoHideChanged(isEnabled: true, pointerInside: false)):
-      isPointerInsidePanel = false
-      if !isMinimumVisibilityElapsed {
-        hasPendingHide = true
-        return [.rememberPendingHide]
-      }
       phase = .hidePending
       return [.scheduleHide]
+    case (.hidePending, .autoHideChanged(isEnabled: true, pointerInside: false)):
+      return []
+    case (.shown, .autoHideChanged(isEnabled: true, pointerInside: true)),
+         (.hidePending, .autoHideChanged(isEnabled: true, pointerInside: true)):
+      // Entering the panel while hide is pending is handled by pointerEnteredPanel;
+      // re-enabling auto-hide while already over the panel keeps it shown.
+      if phase == .hidePending {
+        phase = .shown
+        return [.cancelHide]
+      }
+      return []
+
     default:
       return []
     }

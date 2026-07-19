@@ -67,6 +67,16 @@ struct ContentView: View {
     } message: {
       Text(store.errorMessage ?? "")
     }
+    .background {
+      Button("Select All") {
+        store.selectAllVisibleItems()
+      }
+      .keyboardShortcut("a", modifiers: .command)
+      .opacity(0)
+      .frame(width: 0, height: 0)
+      .allowsHitTesting(false)
+      .accessibilityHidden(true)
+    }
   }
 
   private var panelBackground: some View {
@@ -267,6 +277,14 @@ struct ContentView: View {
         }
         .help("Empty Trash")
       } else if store.viewMode == .bucket {
+        Button {
+          store.selectAllVisibleItems()
+        } label: {
+          Image(systemName: "checklist")
+        }
+        .disabled(store.visibleItems.isEmpty)
+        .help("Select all items (⌘A)")
+
         Button {
           store.stackSelectedItems()
         } label: {

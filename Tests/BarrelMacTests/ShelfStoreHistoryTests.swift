@@ -61,6 +61,32 @@ final class ShelfStoreHistoryTests: XCTestCase {
     XCTAssertTrue(store.selectedIDs.isEmpty)
   }
 
+  func testSelectAllVisibleItemsMarksEveryBucketItem() async throws {
+    let fixture = try await Fixture()
+    let second = fixture.root.appendingPathComponent("Second.txt")
+    try Data("more".utf8).write(to: second)
+    _ = await fixture.repository.importFiles([second], origin: .imported, expiresAt: nil)
+    let store = ShelfStore(repository: fixture.repository, indexesSpotlight: false, loadOnInit: false)
+    await store.refresh()
+    XCTAssertEqual(store.visibleItems.count, 2)
+
+    store.selectAllVisibleItems()
+
+    XCTAssertEqual(store.selectedIDs, Set(store.visibleItems.map(\.id)))
+    XCTAssertNotNil(store.selectedItemID)
+  }
+
+  func testSelectAllDoesNothingInHistoryMode() async throws {
+    let fixture = try await Fixture()
+    let store = ShelfStore(repository: fixture.repository, indexesSpotlight: false, loadOnInit: false)
+    await store.refresh()
+    await store.openHistory()
+
+    store.selectAllVisibleItems()
+
+    XCTAssertTrue(store.selectedIDs.isEmpty)
+  }
+
   func testHistoryRefreshAndUndoKeepBucketSelectionEmpty() async throws {
     let fixture = try await Fixture()
     let export = try await fixture.export(fileName: "History.txt")
@@ -303,7 +329,7 @@ final class ShelfStoreHistoryTests: XCTestCase {
 
 private final class Fixture: @unchecked Sendable {
   let repository: ShelfRepository
-  private let root: URL
+  let root: URL
   private let source: URL
   let destination: URL
   private let clock = Clock()
